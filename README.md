@@ -7,7 +7,7 @@ A native Kotlin Compiler Plugin for [Koin](https://insert-koin.io/) dependency i
 ```kotlin
 // build.gradle.kts
 plugins {
-    id("io.insert-koin.compiler.plugin") version "0.3.0"
+    id("io.insert-koin.compiler.plugin") version "0.3.1-DEV"
 }
 
 dependencies {
@@ -80,8 +80,10 @@ fun main() {
 ```kotlin
 // build.gradle.kts
 koinCompiler {
-    userLogs = true   // Log component detection
-    debugLogs = true  // Log internal processing (verbose)
+    userLogs = true           // Log component detection
+    debugLogs = true          // Log internal processing (verbose)
+    dslSafetyChecks = true    // Validates create() is the only instruction in lambda (default: true)
+    skipDefaultValues = true  // Skip injection for parameters with default values (default: true)
 }
 ```
 

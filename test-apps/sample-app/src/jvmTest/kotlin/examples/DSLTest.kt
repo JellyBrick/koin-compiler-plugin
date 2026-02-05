@@ -200,4 +200,40 @@ class DSLTest {
 
         println("All tests passed! ✅")
     }
+
+    @Test
+    fun test_default_values() {
+        println("Testing default values...")
+
+        val m = module {
+            single<A>()
+            // ServiceWithDefaultValue has no A dependency, just a String with default value
+            // String is NOT registered, so it should use the default value "default_name"
+            single<ServiceWithDefaultValue>()
+            // ServiceWithMixedParams has A (injected) + String and Int with defaults
+            single<ServiceWithMixedParams>()
+        }
+
+        val koin = koinApplication {
+            printLogger(Level.DEBUG)
+            modules(m)
+        }.koin
+
+        println("ServiceWithDefaultValue - should use default value for name")
+        val swd = koin.get<ServiceWithDefaultValue>()
+        println("swd.name: ${swd.name}")
+        assert(swd.name == "default_name") { "Expected 'default_name' but got '${swd.name}'" }
+
+        println("ServiceWithMixedParams - should inject A but use defaults for label and count")
+        val smp = koin.get<ServiceWithMixedParams>()
+        val a = koin.get<A>()
+        println("smp.a: ${smp.a}")
+        println("smp.label: ${smp.label}")
+        println("smp.count: ${smp.count}")
+        assert(smp.a == a) { "Expected A to be injected" }
+        assert(smp.label == "default_label") { "Expected 'default_label' but got '${smp.label}'" }
+        assert(smp.count == 42) { "Expected 42 but got '${smp.count}'" }
+
+        println("Default value tests passed! ✅")
+    }
 }

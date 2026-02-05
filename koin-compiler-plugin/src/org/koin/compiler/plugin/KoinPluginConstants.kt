@@ -21,6 +21,9 @@ object KoinPluginConstants {
     /** Option to enable DSL safety checks (validates create() is the only instruction in lambda). */
     const val OPTION_DSL_SAFETY_CHECKS = "dslSafetyChecks"
 
+    /** Option to skip injection for parameters with default values. */
+    const val OPTION_SKIP_DEFAULT_VALUES = "skipDefaultValues"
+
     // ================================================================================
     // Definition Types - Used for hint functions and logging
     // ================================================================================

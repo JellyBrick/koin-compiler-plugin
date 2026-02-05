@@ -53,3 +53,7 @@ class MyClassWithParam(@InjectedParam val i: Int)
 // ViewModel test
 class MyViewModel(val a: A, val b: B) : ViewModel()
 class MyViewModel2(val a: A, val b: B) : ViewModel()
+
+// Default value test - non-nullable parameter with default value should skip injection
+class ServiceWithDefaultValue(val name: String = "default_name")
+class ServiceWithMixedParams(val a: A, val label: String = "default_label", val count: Int = 42)

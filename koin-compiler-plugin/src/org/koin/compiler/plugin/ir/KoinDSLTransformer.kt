@@ -241,7 +241,11 @@ class KoinDSLTransformer(
                 KoinPluginLogger.user { "Intercepting $enclosingDef { create(::${targetClass.name}) } -> ${targetClass.name}" }
                 builder.irCallConstructor(referencedFunction.symbol, emptyList()).apply {
                     referencedFunction.valueParameters.forEachIndexed { index, param ->
-                        putValueArgument(index, generateKoinArgumentForParameter(param, scopeReceiver, null, builder))
+                        val argument = generateKoinArgumentForParameter(param, scopeReceiver, null, builder)
+                        if (argument != null) {
+                            putValueArgument(index, argument)
+                        }
+                        // If argument is null, parameter has a default value and will use it
                     }
                 }
             }
@@ -251,7 +255,11 @@ class KoinDSLTransformer(
                 KoinPluginLogger.user { "Intercepting $enclosingDef { create(::${referencedFunction.name}) } -> $returnTypeName" }
                 builder.irCall(referencedFunction.symbol).apply {
                     referencedFunction.valueParameters.forEachIndexed { index, param ->
-                        putValueArgument(index, generateKoinArgumentForParameter(param, scopeReceiver, null, builder))
+                        val argument = generateKoinArgumentForParameter(param, scopeReceiver, null, builder)
+                        if (argument != null) {
+                            putValueArgument(index, argument)
+                        }
+                        // If argument is null, parameter has a default value and will use it
                     }
                 }
             }
@@ -401,7 +409,11 @@ class KoinDSLTransformer(
             constructor.valueParameters.forEachIndexed { index, param ->
                 val scopeGet = lambdaBuilder.irGet(extensionReceiverParam)
                 val paramsGet = lambdaBuilder.irGet(parametersHolderParam)
-                putValueArgument(index, generateKoinArgumentForParameter(param, scopeGet, paramsGet, lambdaBuilder))
+                val argument = generateKoinArgumentForParameter(param, scopeGet, paramsGet, lambdaBuilder)
+                if (argument != null) {
+                    putValueArgument(index, argument)
+                }
+                // If argument is null, parameter has a default value and will use it
             }
         }
 
@@ -423,12 +435,17 @@ class KoinDSLTransformer(
 
     // Qualifier extraction and creation methods have been moved to QualifierExtractor
 
+    /**
+     * Generates a Koin argument for a constructor/function parameter.
+     * Returns null if the parameter has a default value and no explicit annotation,
+     * in which case the default value should be used.
+     */
     private fun generateKoinArgumentForParameter(
         param: IrValueParameter,
         scopeReceiver: IrExpression,
         parametersHolderReceiver: IrExpression?,
         builder: DeclarationIrBuilder
-    ): IrExpression {
+    ): IrExpression? {
         val paramType = param.type
 
         // @Property -> getProperty()
@@ -447,6 +464,14 @@ class KoinDSLTransformer(
         }
 
         val qualifier = qualifierExtractor.extractFromParameter(param)
+
+        // If skipDefaultValues is enabled, parameter has a default value, is NOT nullable,
+        // and has no explicit qualifier annotation, skip injection.
+        // Nullable parameters should still use getOrNull() to let the DI container handle resolution.
+        if (KoinPluginLogger.skipDefaultValuesEnabled && param.defaultValue != null && qualifier == null && paramType.makeNotNull() == paramType) {
+            KoinPluginLogger.user { "  Skipping injection for parameter '${param.name}' - using default value" }
+            return null
+        }
         val classifier = paramType.classifierOrNull?.owner
 
         // Lazy<T> -> inject()

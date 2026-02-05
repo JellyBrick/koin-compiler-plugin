@@ -62,7 +62,7 @@ class KoinAnnotationProcessor(
             scopeReceiver: IrExpression,
             parametersHolderReceiver: IrExpression,
             builder: DeclarationIrBuilder
-        ): IrExpression = generateKoinArgumentForParameter(param, scopeReceiver, parametersHolderReceiver, builder)
+        ): IrExpression? = generateKoinArgumentForParameter(param, scopeReceiver, parametersHolderReceiver, builder)
     }
 
     // Lambda builder helper
@@ -1907,7 +1907,10 @@ class KoinAnnotationProcessor(
                     val scopeGet = irBuilder.irGet(scopeParam)
                     val paramsGet = irBuilder.irGet(paramsParam)
                     val argument = generateKoinArgumentForParameter(param, scopeGet, paramsGet, irBuilder)
-                    putValueArgument(index, argument)
+                    if (argument != null) {
+                        putValueArgument(index, argument)
+                    }
+                    // If argument is null, parameter has a default value and will use it
                 }
             }
         }
@@ -1938,7 +1941,10 @@ class KoinAnnotationProcessor(
                     val scopeGet = irBuilder.irGet(scopeParam)
                     val paramsGet = irBuilder.irGet(paramsParam)
                     val argument = generateKoinArgumentForParameter(param, scopeGet, paramsGet, irBuilder)
-                    putValueArgument(index, argument)
+                    if (argument != null) {
+                        putValueArgument(index, argument)
+                    }
+                    // If argument is null, parameter has a default value and will use it
                 }
             }
         }
@@ -1962,18 +1968,26 @@ class KoinAnnotationProcessor(
                     val scopeGet = irBuilder.irGet(scopeParam)
                     val paramsGet = irBuilder.irGet(paramsParam)
                     val argument = generateKoinArgumentForParameter(param, scopeGet, paramsGet, irBuilder)
-                    putValueArgument(index, argument)
+                    if (argument != null) {
+                        putValueArgument(index, argument)
+                    }
+                    // If argument is null, parameter has a default value and will use it
                 }
             }
         }
     }
 
+    /**
+     * Generates a Koin argument for a constructor/function parameter.
+     * Returns null if the parameter has a default value and no explicit annotation,
+     * in which case the default value should be used.
+     */
     private fun generateKoinArgumentForParameter(
         param: IrValueParameter,
         scopeReceiver: IrExpression,
         parametersHolderReceiver: IrExpression,
         builder: DeclarationIrBuilder
-    ): IrExpression {
+    ): IrExpression? {
         val paramType = param.type
 
         // Check for @Property annotation - use getProperty() instead of get()
@@ -1996,6 +2010,14 @@ class KoinAnnotationProcessor(
         }
 
         val qualifier = qualifierExtractor.extractFromParameter(param)
+
+        // If skipDefaultValues is enabled, parameter has a default value, is NOT nullable,
+        // and has no explicit qualifier annotation, skip injection.
+        // Nullable parameters should still use getOrNull() to let the DI container handle resolution.
+        if (KoinPluginLogger.skipDefaultValuesEnabled && param.defaultValue != null && qualifier == null && !paramType.isMarkedNullable()) {
+            KoinPluginLogger.user { "  Skipping injection for parameter '${param.name}' - using default value" }
+            return null
+        }
 
         val classifier = paramType.classifierOrNull?.owner
         if (classifier is IrClass) {

@@ -162,9 +162,10 @@ Each test file has golden files (`*.fir.txt`, `*.fir.ir.txt`) containing expecte
 ```kotlin
 // build.gradle.kts
 koinCompiler {
-    userLogs = true        // Component detection logs
-    debugLogs = true       // Internal processing logs (verbose)
-    dslSafetyChecks = true // Validates create() is the only instruction in lambda (default: true)
+    userLogs = true           // Component detection logs
+    debugLogs = true          // Internal processing logs (verbose)
+    dslSafetyChecks = true    // Validates create() is the only instruction in lambda (default: true)
+    skipDefaultValues = true  // Skip injection for parameters with default values (default: true)
 }
 ```
 
@@ -184,6 +185,32 @@ scoped {
 ```
 
 Set `dslSafetyChecks = false` when migrating from legacy DSL code that has additional statements in create lambdas.
+
+### Skip Default Values
+
+When `skipDefaultValues` is enabled (default), parameters with Kotlin default values will use the default instead of being resolved from the DI container. This applies when:
+- The parameter has a default value
+- The parameter is **not** nullable (nullable params still use `getOrNull()`)
+- The parameter has **no** explicit annotation (`@Named`, `@Qualifier`, `@InjectedParam`, `@Property`)
+
+```kotlin
+// With skipDefaultValues = true (default):
+class ServiceWithDefault(val name: String = "default_name")
+single<ServiceWithDefault>()
+// Generated: ServiceWithDefault()  -- uses Kotlin default
+
+// Nullable parameters are still injected:
+class Service(val dep: Dependency? = null)
+single<Service>()
+// Generated: Service(scope.getOrNull())
+
+// Annotated parameters are always injected:
+class Service(@Named("custom") val name: String = "fallback")
+single<Service>()
+// Generated: Service(scope.get(named("custom")))
+```
+
+Set `skipDefaultValues = false` to always inject all parameters from the DI container, ignoring Kotlin default values.
 
 ## Compatibility
 

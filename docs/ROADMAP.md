@@ -79,7 +79,22 @@ class ApiClient(@Property("api.timeout") val timeout: Int)
 // Generates: factory { ApiClient(getProperty("api.timeout", DEFAULT_TIMEOUT)) }
 ```
 
-### 2.2 JSR-330 Compatibility Toggle
+### 2.2 Skip Default Values ✅
+Skip DI injection for parameters with Kotlin default values:
+- [x] `skipDefaultValues` option in `koinCompiler { }` DSL (default: `true`)
+- [x] Non-nullable parameters with defaults use Kotlin default value
+- [x] Nullable parameters still use `getOrNull()` regardless
+- [x] Annotated parameters (`@Named`, `@Qualifier`, etc.) always injected
+- [x] User log traces when parameters are skipped
+
+```kotlin
+class Service(val a: A, val name: String = "default")
+single<Service>()
+// With skipDefaultValues=true:  Service(scope.get())  -- name uses default
+// With skipDefaultValues=false: Service(scope.get(), scope.get())
+```
+
+### 2.3 JSR-330 Compatibility Toggle
 Allow enabling/disabling JSR-330 annotation support via Gradle property:
 - [ ] Add `jsr330` option to `koinCompiler { }` DSL (default: `true`)
 - [ ] Pass option to compiler plugin via `CommandLineProcessor`

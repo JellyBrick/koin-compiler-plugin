@@ -182,6 +182,9 @@ class LambdaBuilder(
     /**
      * Generate a Koin argument for a parameter (get(), getOrNull(), inject(), parametersOf(), getProperty()).
      *
+     * Returns null if the parameter has a default value and no explicit annotation,
+     * in which case the default value should be used.
+     *
      * Delegates to the ArgumentGenerator for the actual implementation.
      */
     fun generateArgumentForParameter(
@@ -189,7 +192,7 @@ class LambdaBuilder(
         scopeReceiver: IrExpression,
         parametersHolderReceiver: IrExpression,
         builder: DeclarationIrBuilder
-    ): IrExpression {
+    ): IrExpression? {
         return argumentGenerator.generateForParameter(param, scopeReceiver, parametersHolderReceiver, builder)
     }
 }
@@ -204,6 +207,9 @@ interface ArgumentGenerator {
     /**
      * Generate the appropriate Koin call for a parameter.
      *
+     * Returns null if the parameter has a default value and no explicit annotation,
+     * in which case the default value should be used (no argument passed).
+     *
      * Handles:
      * - @Property -> getProperty()
      * - @InjectedParam -> ParametersHolder.get()
@@ -211,6 +217,7 @@ interface ArgumentGenerator {
      * - List<T> -> getAll()
      * - Lazy<T> -> inject()
      * - Nullable -> getOrNull()
+     * - Default value (no annotation) -> null (use Kotlin default)
      * - Default -> get()
      */
     fun generateForParameter(
@@ -218,5 +225,5 @@ interface ArgumentGenerator {
         scopeReceiver: IrExpression,
         parametersHolderReceiver: IrExpression,
         builder: DeclarationIrBuilder
-    ): IrExpression
+    ): IrExpression?
 }

@@ -434,8 +434,10 @@ Enable logging via the `koinCompiler` extension in your `build.gradle.kts`:
 
 ```kotlin
 koinCompiler {
-    userLogs = true   // Component detection logs (what's being processed)
-    debugLogs = true  // Internal processing logs (verbose)
+    userLogs = true           // Component detection logs (what's being processed)
+    debugLogs = true          // Internal processing logs (verbose)
+    dslSafetyChecks = true    // Validates create() is the only instruction in lambda (default: true)
+    skipDefaultValues = true  // Skip injection for parameters with default values (default: true)
 }
 ```
 
@@ -464,6 +466,7 @@ w: [Koin]   Scanning packages: examples.annotations
 w: [Koin] @Singleton on class MyService
 w: [Koin]   @Named("production")
 w: [Koin] Intercepting single<MyClass>() on Module
+w: [Koin]   Skipping injection for parameter 'timeout' - using default value
 w: [Koin] Intercepting startKoin<MyApp>()
 w: [Koin]   -> Injecting modules: examples.annotations.MyModule
 w: [Koin-FIR] Found 1 @Configuration modules

@@ -38,4 +38,14 @@ open class KoinGradleExtension(objectFactory: ObjectFactory) {
      * Set to false when migrating from legacy DSL code that has other statements in create lambdas.
      */
     val dslSafetyChecks: Property<Boolean> = objectFactory.property(Boolean::class.java).convention(true)
+
+    /**
+     * Skip injection for parameters with default values (default: true).
+     * When enabled, non-nullable parameters with Kotlin default values will use
+     * the default value instead of being resolved from the DI container.
+     * Nullable parameters are not affected (they still use getOrNull()).
+     * Parameters with explicit annotations (@Named, @Qualifier, @InjectedParam, @Property)
+     * are always injected regardless of this setting.
+     */
+    val skipDefaultValues: Property<Boolean> = objectFactory.property(Boolean::class.java).convention(true)
 }

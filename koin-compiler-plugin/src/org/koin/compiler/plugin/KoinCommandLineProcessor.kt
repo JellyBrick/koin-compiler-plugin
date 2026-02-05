@@ -14,6 +14,7 @@ object KoinConfigurationKeys {
     val USER_LOGS: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.userLogs")
     val DEBUG_LOGS: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.debugLogs")
     val DSL_SAFETY_CHECKS: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.dslSafetyChecks")
+    val SKIP_DEFAULT_VALUES: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.skipDefaultValues")
 }
 
 @Suppress("unused") // Used via reflection.
@@ -23,6 +24,7 @@ class KoinCommandLineProcessor : CommandLineProcessor {
         const val OPTION_USER_LOGS = KoinPluginConstants.OPTION_USER_LOGS
         const val OPTION_DEBUG_LOGS = KoinPluginConstants.OPTION_DEBUG_LOGS
         const val OPTION_DSL_SAFETY_CHECKS = KoinPluginConstants.OPTION_DSL_SAFETY_CHECKS
+        const val OPTION_SKIP_DEFAULT_VALUES = KoinPluginConstants.OPTION_SKIP_DEFAULT_VALUES
     }
 
     override val pluginId: String = BuildConfig.KOTLIN_PLUGIN_ID
@@ -45,6 +47,12 @@ class KoinCommandLineProcessor : CommandLineProcessor {
             valueDescription = "<true|false>",
             description = "Enable DSL safety checks (validates create() is the only instruction in lambda)",
             required = false
+        ),
+        CliOption(
+            optionName = OPTION_SKIP_DEFAULT_VALUES,
+            valueDescription = "<true|false>",
+            description = "Skip injection for parameters with default values (use Kotlin defaults instead)",
+            required = false
         )
     )
 
@@ -53,6 +61,7 @@ class KoinCommandLineProcessor : CommandLineProcessor {
             OPTION_USER_LOGS -> configuration.put(KoinConfigurationKeys.USER_LOGS, value.toBoolean())
             OPTION_DEBUG_LOGS -> configuration.put(KoinConfigurationKeys.DEBUG_LOGS, value.toBoolean())
             OPTION_DSL_SAFETY_CHECKS -> configuration.put(KoinConfigurationKeys.DSL_SAFETY_CHECKS, value.toBoolean())
+            OPTION_SKIP_DEFAULT_VALUES -> configuration.put(KoinConfigurationKeys.SKIP_DEFAULT_VALUES, value.toBoolean())
             else -> error("Unexpected config option: '${option.optionName}'")
         }
     }

@@ -17,6 +17,7 @@ class KoinGradlePlugin : KotlinCompilerPluginSupportPlugin {
         const val OPTION_USER_LOGS = "userLogs"
         const val OPTION_DEBUG_LOGS = "debugLogs"
         const val OPTION_DSL_SAFETY_CHECKS = "dslSafetyChecks"
+        const val OPTION_SKIP_DEFAULT_VALUES = "skipDefaultValues"
     }
 
     override fun apply(target: Project) {
@@ -43,7 +44,8 @@ class KoinGradlePlugin : KotlinCompilerPluginSupportPlugin {
             listOf(
                 SubpluginOption(OPTION_USER_LOGS, extension.userLogs.get().toString()),
                 SubpluginOption(OPTION_DEBUG_LOGS, extension.debugLogs.get().toString()),
-                SubpluginOption(OPTION_DSL_SAFETY_CHECKS, extension.dslSafetyChecks.get().toString())
+                SubpluginOption(OPTION_DSL_SAFETY_CHECKS, extension.dslSafetyChecks.get().toString()),
+                SubpluginOption(OPTION_SKIP_DEFAULT_VALUES, extension.skipDefaultValues.get().toString())
             )
         }
     }

@@ -386,24 +386,58 @@ buildSingle(Aggregator::class, null) { scope, params ->
 }
 ```
 
-### 3.8 Complete Parameter Decision Table
+### 3.8 Default Value Handling
 
-| Parameter Type | Annotation | Generated Call |
-|----------------|------------|----------------|
-| `T` (non-nullable) | - | `scope.get()` |
-| `T?` (nullable) | - | `scope.getOrNull()` |
-| `T` | `@Named("x")` | `scope.get(named("x"))` |
-| `T?` | `@Named("x")` | `scope.getOrNull(named("x"))` |
-| `T` | `@Qualifier(X::class)` | `scope.get(typeQualifier<X>())` |
-| `T?` | `@Qualifier(X::class)` | `scope.getOrNull(typeQualifier<X>())` |
-| `T` | `@InjectedParam` | `params.get()` |
-| `T?` | `@InjectedParam` | `params.getOrNull()` |
-| `String` | `@Property("key")` | `scope.getProperty("key")` |
-| `String` | `@Property("key") @PropertyValue("default")` | `scope.getProperty("key", "default")` |
-| `Lazy<T>` | - | `scope.inject()` |
-| `Lazy<T>` | `@Named("x")` | `scope.inject(named("x"))` |
-| `Lazy<T>` | `@Qualifier(X::class)` | `scope.inject(typeQualifier<X>())` |
-| `List<T>` | - | `scope.getAll()` |
+When `skipDefaultValues` is enabled (default: `true`), parameters with Kotlin default values skip DI injection and use the default value instead. This only applies to non-nullable parameters without explicit annotations.
+
+**Input**:
+```kotlin
+class ServiceWithDefault(val a: A, val name: String = "default", val count: Int = 42)
+single<ServiceWithDefault>()
+```
+
+**Output** (with `skipDefaultValues = true`):
+```kotlin
+buildSingle(ServiceWithDefault::class, null) { scope, params ->
+    ServiceWithDefault(scope.get())  // name and count use Kotlin defaults
+}
+```
+
+**Output** (with `skipDefaultValues = false`):
+```kotlin
+buildSingle(ServiceWithDefault::class, null) { scope, params ->
+    ServiceWithDefault(scope.get(), scope.get(), scope.get())  // all params injected
+}
+```
+
+**Rules**:
+- Non-nullable + default value + no annotation = **skip injection** (use default)
+- Nullable + default value = **still inject** via `getOrNull()`
+- Annotated + default value (`@Named`, `@Qualifier`, etc.) = **still inject**
+
+### 3.9 Complete Parameter Decision Table
+
+| Parameter Type | Annotation | Default Value | Generated Call |
+|----------------|------------|:---:|----------------|
+| `T` (non-nullable) | - | No | `scope.get()` |
+| `T` (non-nullable) | - | Yes | *(skipped - uses Kotlin default)* |
+| `T?` (nullable) | - | No | `scope.getOrNull()` |
+| `T?` (nullable) | - | Yes | `scope.getOrNull()` |
+| `T` | `@Named("x")` | No | `scope.get(named("x"))` |
+| `T` | `@Named("x")` | Yes | `scope.get(named("x"))` |
+| `T?` | `@Named("x")` | No | `scope.getOrNull(named("x"))` |
+| `T` | `@Qualifier(X::class)` | No | `scope.get(typeQualifier<X>())` |
+| `T?` | `@Qualifier(X::class)` | No | `scope.getOrNull(typeQualifier<X>())` |
+| `T` | `@InjectedParam` | No | `params.get()` |
+| `T?` | `@InjectedParam` | No | `params.getOrNull()` |
+| `String` | `@Property("key")` | No | `scope.getProperty("key")` |
+| `String` | `@Property("key") @PropertyValue("default")` | No | `scope.getProperty("key", "default")` |
+| `Lazy<T>` | - | No | `scope.inject()` |
+| `Lazy<T>` | `@Named("x")` | No | `scope.inject(named("x"))` |
+| `Lazy<T>` | `@Qualifier(X::class)` | No | `scope.inject(typeQualifier<X>())` |
+| `List<T>` | - | No | `scope.getAll()` |
+
+> **Note**: The "Default Value = Yes, skipped" behavior requires `skipDefaultValues = true` (the default). When disabled, all parameters are injected regardless of default values.
 
 ---
 
