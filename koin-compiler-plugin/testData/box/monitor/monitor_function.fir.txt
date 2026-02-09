@@ -1,0 +1,19 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Monitor|() public final fun monitoredFunction(): R|kotlin/String| {
+        ^monitoredFunction String(monitored)
+    }
+    public final fun regularFunction(): R|kotlin/String| {
+        ^regularFunction String(regular)
+    }
+    public final fun box(): R|kotlin/String| {
+        lval regular: R|kotlin/String| = R|/regularFunction|()
+        ^box when () {
+            ==(R|<local>/regular|, String(regular)) ->  {
+                String(OK)
+            }
+            else ->  {
+                <strcat>(String(FAIL: regular=), R|<local>/regular|)
+            }
+        }
+
+    }

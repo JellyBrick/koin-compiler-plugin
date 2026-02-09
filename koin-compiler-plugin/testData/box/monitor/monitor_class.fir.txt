@@ -1,0 +1,42 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Monitor|() public final class MonitoredService : R|kotlin/Any| {
+        public constructor(): R|MonitoredService| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final fun getValue(): R|kotlin/Int| {
+            ^getValue Int(42)
+        }
+
+        public final fun getMessage(): R|kotlin/String| {
+            ^getMessage String(hello)
+        }
+
+        private final fun privateMethod(): R|kotlin/Int| {
+            ^privateMethod Int(0)
+        }
+
+    }
+    public final class RegularService : R|kotlin/Any| {
+        public constructor(): R|RegularService| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final fun getValue(): R|kotlin/Int| {
+            ^getValue Int(100)
+        }
+
+    }
+    public final fun box(): R|kotlin/String| {
+        lval regular: R|RegularService| = R|/RegularService.RegularService|()
+        lval v: R|kotlin/Int| = R|<local>/regular|.R|/RegularService.getValue|()
+        ^box when () {
+            ==(R|<local>/v|, Int(100)) ->  {
+                String(OK)
+            }
+            else ->  {
+                <strcat>(String(FAIL: v=), R|<local>/v|)
+            }
+        }
+
+    }

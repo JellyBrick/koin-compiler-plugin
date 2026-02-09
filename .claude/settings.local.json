@@ -67,7 +67,8 @@
       "Bash(python3:*)",
       "WebFetch(domain:gradleup.github.io)",
       "WebFetch(domain:gradleup.com)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(./test.sh:*)"
     ],
     "deny": [],
     "ask": []

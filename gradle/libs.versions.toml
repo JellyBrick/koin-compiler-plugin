@@ -1,6 +1,7 @@
 [versions]
 kotlin = "2.3.20-Beta1"
 koin = "4.2.0-RC1"
+kotzilla-sdk = "1.2.1"
 build-config = "5.6.5"
 bcv = "0.16.3"
 junit = "4.13.2"
@@ -10,6 +11,7 @@ nmcp = "1.0.1"
 junit = { module = "junit:junit", version.ref = "junit" }
 koin-annotations = { module = "io.insert-koin:koin-annotations-jvm", version.ref = "koin" }
 koin-core = { module = "io.insert-koin:koin-core-jvm", version.ref = "koin" }
+kotzilla-core = { module = "io.kotzilla:kotzilla-core-jvm", version.ref = "kotzilla-sdk" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

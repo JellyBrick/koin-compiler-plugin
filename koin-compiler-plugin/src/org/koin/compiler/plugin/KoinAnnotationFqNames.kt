@@ -101,6 +101,20 @@ object KoinAnnotationFqNames {
     val KOIN_APPLICATION = FqName("org.koin.core.annotation.KoinApplication")
 
     // ================================================================================
+    // Monitoring Annotations
+    // ================================================================================
+
+    /** @Monitor annotation - wraps function body with Kotzilla trace calls. */
+    val MONITOR = FqName("org.koin.core.annotation.Monitor")
+
+    // ================================================================================
+    // Kotzilla SDK
+    // ================================================================================
+
+    /** io.kotzilla.sdk.KotzillaCore class. */
+    val KOTZILLA_CORE = FqName("io.kotzilla.sdk.KotzillaCore")
+
+    // ================================================================================
     // JSR-330 Annotations (Jakarta - new package)
     // ================================================================================
 

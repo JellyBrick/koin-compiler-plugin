@@ -146,6 +146,28 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
   }
 
   @Nested
+  @TestMetadata("koin-compiler-plugin/testData/box/monitor")
+  @TestDataPath("$PROJECT_ROOT")
+  public class Monitor {
+    @Test
+    public void testAllFilesPresentInMonitor() {
+      KtTestUtil.assertAllTestsPresentByMetadataWithExcluded(this.getClass(), new File("koin-compiler-plugin/testData/box/monitor"), Pattern.compile("^(.+)\\.kt$"), null, true);
+    }
+
+    @Test
+    @TestMetadata("monitor_class.kt")
+    public void testMonitor_class() {
+      runTest("koin-compiler-plugin/testData/box/monitor/monitor_class.kt");
+    }
+
+    @Test
+    @TestMetadata("monitor_function.kt")
+    public void testMonitor_function() {
+      runTest("koin-compiler-plugin/testData/box/monitor/monitor_function.kt");
+    }
+  }
+
+  @Nested
   @TestMetadata("koin-compiler-plugin/testData/box/params")
   @TestDataPath("$PROJECT_ROOT")
   public class Params {

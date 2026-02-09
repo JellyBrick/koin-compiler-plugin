@@ -1,0 +1,100 @@
+FILE fqName:<root> fileName:/test.kt
+  CLASS CLASS name:MonitoredService modality:FINAL visibility:public superTypes:[kotlin.Any]
+    annotations:
+      Monitor
+    thisReceiver: VALUE_PARAMETER INSTANCE_RECEIVER kind:DispatchReceiver name:<this> type:<root>.MonitoredService
+    CONSTRUCTOR visibility:public returnType:<root>.MonitoredService [primary]
+      BLOCK_BODY
+        DELEGATING_CONSTRUCTOR_CALL 'public constructor <init> () declared in kotlin.Any'
+        INSTANCE_INITIALIZER_CALL classDescriptor='CLASS CLASS name:MonitoredService modality:FINAL visibility:public superTypes:[kotlin.Any]' type=kotlin.Unit
+    FUN FAKE_OVERRIDE name:equals visibility:public modality:OPEN returnType:kotlin.Boolean [fake_override,operator]
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:kotlin.Any
+      VALUE_PARAMETER kind:Regular name:other index:1 type:kotlin.Any?
+      overridden:
+        public open fun equals (other: kotlin.Any?): kotlin.Boolean declared in kotlin.Any
+    FUN FAKE_OVERRIDE name:hashCode visibility:public modality:OPEN returnType:kotlin.Int [fake_override]
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:kotlin.Any
+      overridden:
+        public open fun hashCode (): kotlin.Int declared in kotlin.Any
+    FUN FAKE_OVERRIDE name:toString visibility:public modality:OPEN returnType:kotlin.String [fake_override]
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:kotlin.Any
+      overridden:
+        public open fun toString (): kotlin.String declared in kotlin.Any
+    FUN name:getMessage visibility:public modality:FINAL returnType:kotlin.String
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:<root>.MonitoredService
+      BLOCK_BODY
+        RETURN type=kotlin.Nothing from='public final fun getMessage (): kotlin.String declared in <root>.MonitoredService'
+          CALL 'public final fun trace <T> (tag: kotlin.String, stacktrace: kotlin.Boolean, code: kotlin.Function0<T of io.kotzilla.sdk.KotzillaCore.trace>): T of io.kotzilla.sdk.KotzillaCore.trace declared in io.kotzilla.sdk.KotzillaCore' type=T of io.kotzilla.sdk.KotzillaCore.trace origin=null
+            TYPE_ARG T: kotlin.String
+            ARG <this>: CALL 'public final fun getDefaultInstance (): io.kotzilla.sdk.KotzillaCore declared in io.kotzilla.sdk.KotzillaCore.Companion' type=io.kotzilla.sdk.KotzillaCore origin=null
+              ARG <this>: GET_OBJECT 'CLASS IR_EXTERNAL_DECLARATION_STUB OBJECT name:Companion modality:FINAL visibility:public [companion] superTypes:[kotlin.Any]' type=io.kotzilla.sdk.KotzillaCore.Companion
+            ARG tag: CONST String type=kotlin.String value="MonitoredService.getMessage"
+            ARG stacktrace: CONST Boolean type=kotlin.Boolean value=false
+            ARG code: FUN_EXPR type=kotlin.Function0<kotlin.String> origin=LAMBDA
+              FUN LOCAL_FUNCTION_FOR_LAMBDA name:<anonymous> visibility:local modality:FINAL returnType:kotlin.String
+                BLOCK_BODY
+                  RETURN type=kotlin.Nothing from='local final fun <anonymous> (): kotlin.String declared in <root>.MonitoredService.getMessage'
+                    CONST String type=kotlin.String value="hello"
+    FUN name:getValue visibility:public modality:FINAL returnType:kotlin.Int
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:<root>.MonitoredService
+      BLOCK_BODY
+        RETURN type=kotlin.Nothing from='public final fun getValue (): kotlin.Int declared in <root>.MonitoredService'
+          CALL 'public final fun trace <T> (tag: kotlin.String, stacktrace: kotlin.Boolean, code: kotlin.Function0<T of io.kotzilla.sdk.KotzillaCore.trace>): T of io.kotzilla.sdk.KotzillaCore.trace declared in io.kotzilla.sdk.KotzillaCore' type=T of io.kotzilla.sdk.KotzillaCore.trace origin=null
+            TYPE_ARG T: kotlin.Int
+            ARG <this>: CALL 'public final fun getDefaultInstance (): io.kotzilla.sdk.KotzillaCore declared in io.kotzilla.sdk.KotzillaCore.Companion' type=io.kotzilla.sdk.KotzillaCore origin=null
+              ARG <this>: GET_OBJECT 'CLASS IR_EXTERNAL_DECLARATION_STUB OBJECT name:Companion modality:FINAL visibility:public [companion] superTypes:[kotlin.Any]' type=io.kotzilla.sdk.KotzillaCore.Companion
+            ARG tag: CONST String type=kotlin.String value="MonitoredService.getValue"
+            ARG stacktrace: CONST Boolean type=kotlin.Boolean value=false
+            ARG code: FUN_EXPR type=kotlin.Function0<kotlin.Int> origin=LAMBDA
+              FUN LOCAL_FUNCTION_FOR_LAMBDA name:<anonymous> visibility:local modality:FINAL returnType:kotlin.Int
+                BLOCK_BODY
+                  RETURN type=kotlin.Nothing from='local final fun <anonymous> (): kotlin.Int declared in <root>.MonitoredService.getValue'
+                    CONST Int type=kotlin.Int value=42
+    FUN name:privateMethod visibility:private modality:FINAL returnType:kotlin.Int
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:<root>.MonitoredService
+      BLOCK_BODY
+        RETURN type=kotlin.Nothing from='private final fun privateMethod (): kotlin.Int declared in <root>.MonitoredService'
+          CONST Int type=kotlin.Int value=0
+  CLASS CLASS name:RegularService modality:FINAL visibility:public superTypes:[kotlin.Any]
+    thisReceiver: VALUE_PARAMETER INSTANCE_RECEIVER kind:DispatchReceiver name:<this> type:<root>.RegularService
+    CONSTRUCTOR visibility:public returnType:<root>.RegularService [primary]
+      BLOCK_BODY
+        DELEGATING_CONSTRUCTOR_CALL 'public constructor <init> () declared in kotlin.Any'
+        INSTANCE_INITIALIZER_CALL classDescriptor='CLASS CLASS name:RegularService modality:FINAL visibility:public superTypes:[kotlin.Any]' type=kotlin.Unit
+    FUN FAKE_OVERRIDE name:equals visibility:public modality:OPEN returnType:kotlin.Boolean [fake_override,operator]
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:kotlin.Any
+      VALUE_PARAMETER kind:Regular name:other index:1 type:kotlin.Any?
+      overridden:
+        public open fun equals (other: kotlin.Any?): kotlin.Boolean declared in kotlin.Any
+    FUN FAKE_OVERRIDE name:hashCode visibility:public modality:OPEN returnType:kotlin.Int [fake_override]
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:kotlin.Any
+      overridden:
+        public open fun hashCode (): kotlin.Int declared in kotlin.Any
+    FUN FAKE_OVERRIDE name:toString visibility:public modality:OPEN returnType:kotlin.String [fake_override]
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:kotlin.Any
+      overridden:
+        public open fun toString (): kotlin.String declared in kotlin.Any
+    FUN name:getValue visibility:public modality:FINAL returnType:kotlin.Int
+      VALUE_PARAMETER kind:DispatchReceiver name:<this> index:0 type:<root>.RegularService
+      BLOCK_BODY
+        RETURN type=kotlin.Nothing from='public final fun getValue (): kotlin.Int declared in <root>.RegularService'
+          CONST Int type=kotlin.Int value=100
+  FUN name:box visibility:public modality:FINAL returnType:kotlin.String
+    BLOCK_BODY
+      VAR name:regular type:<root>.RegularService [val]
+        CONSTRUCTOR_CALL 'public constructor <init> () declared in <root>.RegularService' type=<root>.RegularService origin=null
+      VAR name:v type:kotlin.Int [val]
+        CALL 'public final fun getValue (): kotlin.Int declared in <root>.RegularService' type=kotlin.Int origin=null
+          ARG <this>: GET_VAR 'val regular: <root>.RegularService declared in <root>.box' type=<root>.RegularService origin=null
+      RETURN type=kotlin.Nothing from='public final fun box (): kotlin.String declared in <root>'
+        WHEN type=kotlin.String origin=IF
+          BRANCH
+            if: CALL 'public final fun EQEQ (arg0: kotlin.Any?, arg1: kotlin.Any?): kotlin.Boolean declared in kotlin.internal.ir' type=kotlin.Boolean origin=EQEQ
+              ARG arg0: GET_VAR 'val v: kotlin.Int declared in <root>.box' type=kotlin.Int origin=null
+              ARG arg1: CONST Int type=kotlin.Int value=100
+            then: CONST String type=kotlin.String value="OK"
+          BRANCH
+            if: CONST Boolean type=kotlin.Boolean value=true
+            then: STRING_CONCATENATION type=kotlin.String
+              CONST String type=kotlin.String value="FAIL: v="
+              GET_VAR 'val v: kotlin.Int declared in <root>.box' type=kotlin.Int origin=null

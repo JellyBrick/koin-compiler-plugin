@@ -34,6 +34,12 @@ class KoinIrExtension : IrGenerationExtension {
         val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment)
         moduleFragment.transform(startKoinTransformer, null)
 
+        // Phase 4: Transform @Monitor annotated functions
+        // Wraps function bodies with Kotzilla trace calls for performance monitoring
+        KoinPluginLogger.debug { "Phase 4: Processing @Monitor annotations" }
+        val monitorTransformer = KoinMonitorTransformer(pluginContext)
+        moduleFragment.transform(monitorTransformer, null)
+
         KoinPluginLogger.debug { "IR Phase completed" }
     }
 }

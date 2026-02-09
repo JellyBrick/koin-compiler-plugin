@@ -38,6 +38,9 @@ dependencies {
     annotationsRuntimeClasspath(libs.koin.core)
     annotationsRuntimeClasspath(libs.koin.annotations)
 
+    // Kotzilla SDK for @Monitor annotation testing
+    annotationsRuntimeClasspath(libs.kotzilla.core)
+
     // Dependencies required to run the internal test framework.
     testRuntimeOnly(libs.junit)
     testRuntimeOnly(kotlin("reflect"))
