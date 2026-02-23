@@ -14,6 +14,7 @@ class KoinPluginConstantsTest {
         assertEquals("userLogs", KoinPluginConstants.OPTION_USER_LOGS)
         assertEquals("debugLogs", KoinPluginConstants.OPTION_DEBUG_LOGS)
         assertEquals("dslSafetyChecks", KoinPluginConstants.OPTION_DSL_SAFETY_CHECKS)
+        assertEquals("safetyChecks", KoinPluginConstants.OPTION_SAFETY_CHECKS)
     }
 
     @Test

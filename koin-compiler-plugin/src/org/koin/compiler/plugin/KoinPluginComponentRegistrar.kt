@@ -44,15 +44,20 @@ object KoinPluginLogger {
     var skipDefaultValuesEnabled: Boolean = true
         private set
 
+    @Volatile
+    var safetyChecksEnabled: Boolean = true
+        private set
+
     /**
      * Initialize the logger with configuration from the compiler.
      */
-    fun init(collector: MessageCollector, userLogs: Boolean, debugLogs: Boolean, dslSafetyChecks: Boolean = true, skipDefaultValues: Boolean = true) {
+    fun init(collector: MessageCollector, userLogs: Boolean, debugLogs: Boolean, dslSafetyChecks: Boolean = true, skipDefaultValues: Boolean = true, safetyChecks: Boolean = true) {
         messageCollector = collector
         userLogsEnabled = userLogs
         debugLogsEnabled = debugLogs
         dslSafetyChecksEnabled = dslSafetyChecks
         skipDefaultValuesEnabled = skipDefaultValues
+        safetyChecksEnabled = safetyChecks
     }
 
     /**
@@ -139,9 +144,10 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
         val debugLogs = configuration.get(KoinConfigurationKeys.DEBUG_LOGS, false)
         val dslSafetyChecks = configuration.get(KoinConfigurationKeys.DSL_SAFETY_CHECKS, true)
         val skipDefaultValues = configuration.get(KoinConfigurationKeys.SKIP_DEFAULT_VALUES, true)
+        val safetyChecks = configuration.get(KoinConfigurationKeys.SAFETY_CHECKS, true)
 
         // Initialize the centralized logger
-        KoinPluginLogger.init(messageCollector, userLogs, debugLogs, dslSafetyChecks, skipDefaultValues)
+        KoinPluginLogger.init(messageCollector, userLogs, debugLogs, dslSafetyChecks, skipDefaultValues, safetyChecks)
 
         // FIR extension for generating visible declarations (module extension property)
         FirExtensionRegistrarAdapter.registerExtension(KoinPluginRegistrar())

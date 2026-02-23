@@ -67,6 +67,10 @@ class KoinAnnotationProcessor(
     // Definition call builder helper
     private val definitionCallBuilder = DefinitionCallBuilder(context, qualifierExtractor, lambdaBuilder, argumentGenerator)
 
+    // Safety check helpers
+    private val parameterAnalyzer = ParameterAnalyzer(qualifierExtractor)
+    private val bindingRegistry = BindingRegistry()
+
     // Annotation FQNames - use centralized registry
     private val moduleFqName = KoinAnnotationFqNames.MODULE
     private val componentScanFqName = KoinAnnotationFqNames.COMPONENT_SCAN
@@ -639,6 +643,24 @@ class KoinAnnotationProcessor(
                     val extraStr = if (extras.isNotEmpty()) " (${extras.joinToString(", ")})" else ""
                     KoinPluginLogger.user { "  $defType: $defName$extraStr" }
                 }
+            }
+
+            // Compile-time safety: validate that all dependencies are satisfied within this module
+            if (KoinPluginLogger.safetyChecksEnabled && definitions.isNotEmpty()) {
+                val moduleName = moduleClass.irClass.name.asString()
+                // Include definitions from included modules (transitive availability at runtime)
+                val allVisibleDefinitions = buildList {
+                    addAll(definitions)
+                    for (includedModuleClass in moduleClass.includedModules) {
+                        val includedModule = moduleClasses.find {
+                            it.irClass.fqNameWhenAvailable == includedModuleClass.fqNameWhenAvailable
+                        }
+                        if (includedModule != null) {
+                            addAll(collectAllDefinitions(includedModule))
+                        }
+                    }
+                }
+                bindingRegistry.validateModule(moduleName, allVisibleDefinitions, parameterAnalyzer, qualifierExtractor)
             }
 
             // Check if FIR generated a function for this module (even if no local definitions)

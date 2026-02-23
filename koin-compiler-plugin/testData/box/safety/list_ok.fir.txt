@@ -1,0 +1,36 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class TestModule : R|kotlin/Any| {
+        public constructor(): R|TestModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public abstract interface Plugin : R|kotlin/Any| {
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class PluginManager : R|kotlin/Any| {
+        public constructor(plugins: R|kotlin/collections/List<Plugin>|): R|PluginManager| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val plugins: R|kotlin/collections/List<Plugin>| = R|<local>/plugins|
+            public get(): R|kotlin/collections/List<Plugin>|
+
+    }
+    public final fun box(): R|kotlin/String| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|/TestModule.TestModule|().R|/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        lval manager: R|PluginManager| = R|<local>/koin|.R|org/koin/core/Koin.get|<R|PluginManager|>()
+        ^box when () {
+            R|<local>/manager|.R|/PluginManager.plugins|.R|SubstitutionOverride<kotlin/collections/List.isEmpty: R|kotlin/Boolean|>|() ->  {
+                String(OK)
+            }
+            else ->  {
+                String(FAIL: list should be empty)
+            }
+        }
+
+    }
+FILE: /testModuleModule.kt
+    public final fun R|TestModule|.module(): R|org/koin/core/module/Module|

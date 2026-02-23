@@ -1,0 +1,48 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class TestModule : R|kotlin/Any| {
+        public constructor(): R|TestModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final class SessionScope : R|kotlin/Any| {
+        public constructor(): R|SessionScope| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class AuthService : R|kotlin/Any| {
+        public constructor(): R|AuthService| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Scoped|() @R|org/koin/core/annotation/Scope|(value = <getClass>(Q|SessionScope|)) public final class SessionData : R|kotlin/Any| {
+        public constructor(auth: R|AuthService|): R|SessionData| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val auth: R|AuthService| = R|<local>/auth|
+            public get(): R|AuthService|
+
+    }
+    public final fun box(): R|kotlin/String| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|/TestModule.TestModule|().R|/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        lval scope: R|org/koin/core/scope/Scope| = R|<local>/koin|.R|org/koin/core/Koin.createScope|(String(session1), R|org/koin/core/qualifier/named|<R|SessionScope|>())
+        lval sessionData: R|SessionData| = R|<local>/scope|.R|org/koin/core/scope/Scope.get|<R|SessionData|>()
+        R|<local>/scope|.R|org/koin/core/scope/Scope.close|()
+        ^box when () {
+            !=(R|<local>/sessionData|.R|/SessionData.auth|, Null(null)) ->  {
+                String(OK)
+            }
+            else ->  {
+                String(FAIL)
+            }
+        }
+
+    }
+FILE: /testModuleModule.kt
+    public final fun R|TestModule|.module(): R|org/koin/core/module/Module|

@@ -1,0 +1,167 @@
+package org.koin.compiler.plugin.ir
+
+import org.jetbrains.kotlin.ir.declarations.IrClass
+import org.jetbrains.kotlin.ir.declarations.IrConstructor
+import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
+import org.jetbrains.kotlin.ir.declarations.IrValueParameter
+import org.jetbrains.kotlin.ir.types.IrSimpleType
+import org.jetbrains.kotlin.ir.types.classifierOrNull
+import org.jetbrains.kotlin.ir.types.isMarkedNullable
+import org.jetbrains.kotlin.ir.types.typeOrNull
+import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
+import org.jetbrains.kotlin.ir.util.packageFqName
+import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.DeprecatedForRemovalCompilerApi
+import org.koin.compiler.plugin.KoinPluginLogger
+
+/**
+ * Analyzes constructor/function parameters to extract dependency requirements
+ * without generating IR expressions. Used for compile-time safety validation.
+ *
+ * Mirrors the classification logic in KoinArgumentGenerator but produces
+ * data (Requirement) instead of IR call expressions.
+ */
+@OptIn(DeprecatedForRemovalCompilerApi::class)
+@Suppress("DEPRECATION", "DEPRECATION_ERROR")
+class ParameterAnalyzer(
+    private val qualifierExtractor: QualifierExtractor
+) {
+
+    /**
+     * Analyze all value parameters of a constructor.
+     */
+    fun analyzeConstructor(constructor: IrConstructor): List<Requirement> {
+        return constructor.valueParameters.map { analyzeParameter(it) }
+    }
+
+    /**
+     * Analyze all value parameters of a function.
+     */
+    fun analyzeFunction(function: IrSimpleFunction): List<Requirement> {
+        return function.valueParameters.map { analyzeParameter(it) }
+    }
+
+    /**
+     * Analyze a single parameter and produce a Requirement describing what it needs.
+     */
+    fun analyzeParameter(param: IrValueParameter): Requirement {
+        val paramType = param.type
+        val paramName = param.name.asString()
+
+        // @Property("key") → property injection
+        val propertyKey = qualifierExtractor.getPropertyAnnotationKey(param)
+        if (propertyKey != null) {
+            return Requirement(
+                typeKey = typeKeyFromType(paramType),
+                paramName = paramName,
+                isNullable = paramType.isMarkedNullable(),
+                hasDefault = param.defaultValue != null,
+                isInjectedParam = false,
+                isLazy = false,
+                isList = false,
+                isProperty = true,
+                propertyKey = propertyKey,
+                qualifier = null
+            )
+        }
+
+        // @InjectedParam → provided at runtime via parametersOf()
+        val isInjectedParam = qualifierExtractor.hasInjectedParamAnnotation(param)
+        if (isInjectedParam) {
+            return Requirement(
+                typeKey = typeKeyFromType(paramType),
+                paramName = paramName,
+                isNullable = paramType.isMarkedNullable(),
+                hasDefault = param.defaultValue != null,
+                isInjectedParam = true,
+                isLazy = false,
+                isList = false,
+                isProperty = false,
+                propertyKey = null,
+                qualifier = null
+            )
+        }
+
+        val qualifier = qualifierExtractor.extractFromParameter(param)
+
+        // Check skipDefaultValues: parameter has default, no qualifier, not nullable
+        val hasDefault = param.defaultValue != null
+        val isNullable = paramType.isMarkedNullable()
+
+        // Classify the type
+        val classifier = paramType.classifierOrNull?.owner
+        if (classifier is IrClass) {
+            val className = classifier.name.asString()
+            val packageName = classifier.packageFqName?.asString()
+
+            // Lazy<T>
+            if (className == "Lazy" && packageName == "kotlin") {
+                val innerType = (paramType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+                val innerTypeKey = if (innerType != null) typeKeyFromType(innerType) else typeKeyFromType(paramType)
+                return Requirement(
+                    typeKey = innerTypeKey,
+                    paramName = paramName,
+                    isNullable = isNullable,
+                    hasDefault = hasDefault,
+                    isInjectedParam = false,
+                    isLazy = true,
+                    isList = false,
+                    isProperty = false,
+                    propertyKey = null,
+                    qualifier = qualifier
+                )
+            }
+
+            // List<T>
+            if (className == "List" && packageName == "kotlin.collections") {
+                val elementType = (paramType as? IrSimpleType)?.arguments?.firstOrNull()?.typeOrNull
+                val elementTypeKey = if (elementType != null) typeKeyFromType(elementType) else typeKeyFromType(paramType)
+                return Requirement(
+                    typeKey = elementTypeKey,
+                    paramName = paramName,
+                    isNullable = isNullable,
+                    hasDefault = hasDefault,
+                    isInjectedParam = false,
+                    isLazy = false,
+                    isList = true,
+                    isProperty = false,
+                    propertyKey = null,
+                    qualifier = qualifier
+                )
+            }
+        }
+
+        // Regular type
+        return Requirement(
+            typeKey = typeKeyFromType(paramType),
+            paramName = paramName,
+            isNullable = isNullable,
+            hasDefault = hasDefault,
+            isInjectedParam = false,
+            isLazy = false,
+            isList = false,
+            isProperty = false,
+            propertyKey = null,
+            qualifier = qualifier
+        )
+    }
+
+    companion object {
+        /**
+         * Build a TypeKey from an IrType.
+         */
+        fun typeKeyFromType(type: org.jetbrains.kotlin.ir.types.IrType): TypeKey {
+            val classifier = type.classifierOrNull?.owner as? IrClass
+            val classId = classifier?.let {
+                val fqName = it.fqNameWhenAvailable
+                if (fqName != null) {
+                    ClassId.topLevel(fqName)
+                } else {
+                    null
+                }
+            }
+            return TypeKey(classId, classifier?.fqNameWhenAvailable)
+        }
+    }
+}

@@ -224,6 +224,70 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
   }
 
   @Nested
+  @TestMetadata("koin-compiler-plugin/testData/box/safety")
+  @TestDataPath("$PROJECT_ROOT")
+  public class Safety {
+    @Test
+    public void testAllFilesPresentInSafety() {
+      KtTestUtil.assertAllTestsPresentByMetadataWithExcluded(this.getClass(), new File("koin-compiler-plugin/testData/box/safety"), Pattern.compile("^(.+)\\.kt$"), null, true);
+    }
+
+    @Test
+    @TestMetadata("complete_graph.kt")
+    public void testComplete_graph() {
+      runTest("koin-compiler-plugin/testData/box/safety/complete_graph.kt");
+    }
+
+    @Test
+    @TestMetadata("default_value_ok.kt")
+    public void testDefault_value_ok() {
+      runTest("koin-compiler-plugin/testData/box/safety/default_value_ok.kt");
+    }
+
+    @Test
+    @TestMetadata("injected_param_ok.kt")
+    public void testInjected_param_ok() {
+      runTest("koin-compiler-plugin/testData/box/safety/injected_param_ok.kt");
+    }
+
+    @Test
+    @TestMetadata("lazy_valid.kt")
+    public void testLazy_valid() {
+      runTest("koin-compiler-plugin/testData/box/safety/lazy_valid.kt");
+    }
+
+    @Test
+    @TestMetadata("list_ok.kt")
+    public void testList_ok() {
+      runTest("koin-compiler-plugin/testData/box/safety/list_ok.kt");
+    }
+
+    @Test
+    @TestMetadata("module_includes_visible.kt")
+    public void testModule_includes_visible() {
+      runTest("koin-compiler-plugin/testData/box/safety/module_includes_visible.kt");
+    }
+
+    @Test
+    @TestMetadata("nullable_ok.kt")
+    public void testNullable_ok() {
+      runTest("koin-compiler-plugin/testData/box/safety/nullable_ok.kt");
+    }
+
+    @Test
+    @TestMetadata("qualifier_match.kt")
+    public void testQualifier_match() {
+      runTest("koin-compiler-plugin/testData/box/safety/qualifier_match.kt");
+    }
+
+    @Test
+    @TestMetadata("scoped_visibility.kt")
+    public void testScoped_visibility() {
+      runTest("koin-compiler-plugin/testData/box/safety/scoped_visibility.kt");
+    }
+  }
+
+  @Nested
   @TestMetadata("koin-compiler-plugin/testData/box/scopes")
   @TestDataPath("$PROJECT_ROOT")
   public class Scopes {

@@ -26,7 +26,7 @@ private class ExtensionRegistrarConfigurator(testServices: TestServices) : Envir
     ) {
         val messageCollector = configuration.get(CommonConfigurationKeys.MESSAGE_COLLECTOR_KEY, MessageCollector.NONE)
         // Initialize the logger for tests (enable both user and debug logs)
-        KoinPluginLogger.init(messageCollector, userLogs = true, debugLogs = true)
+        KoinPluginLogger.init(messageCollector, userLogs = true, debugLogs = true, safetyChecks = true)
         FirExtensionRegistrarAdapter.registerExtension(KoinPluginRegistrar())
         IrGenerationExtension.registerExtension(KoinIrExtension())
     }

@@ -1,0 +1,41 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class TestModule : R|kotlin/Any| {
+        public constructor(): R|TestModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class HeavyService : R|kotlin/Any| {
+        public constructor(): R|HeavyService| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class Consumer : R|kotlin/Any| {
+        public constructor(heavy: R|kotlin/Lazy<HeavyService>|): R|Consumer| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val heavy: R|kotlin/Lazy<HeavyService>| = R|<local>/heavy|
+            public get(): R|kotlin/Lazy<HeavyService>|
+
+    }
+    public final fun box(): R|kotlin/String| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|/TestModule.TestModule|().R|/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        lval consumer: R|Consumer| = R|<local>/koin|.R|org/koin/core/Koin.get|<R|Consumer|>()
+        lval heavy: R|HeavyService| = R|<local>/consumer|.R|/Consumer.heavy|.R|SubstitutionOverride<kotlin/Lazy.value: R|HeavyService|>|
+        ^box when () {
+            !=(R|<local>/heavy|, Null(null)) ->  {
+                String(OK)
+            }
+            else ->  {
+                String(FAIL)
+            }
+        }
+
+    }
+FILE: /testModuleModule.kt
+    public final fun R|TestModule|.module(): R|org/koin/core/module/Module|

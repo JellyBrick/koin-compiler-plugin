@@ -48,4 +48,13 @@ open class KoinGradleExtension(objectFactory: ObjectFactory) {
      * are always injected regardless of this setting.
      */
     val skipDefaultValues: Property<Boolean> = objectFactory.property(Boolean::class.java).convention(true)
+
+    /**
+     * Enable compile-time dependency safety checks (default: true).
+     * When enabled, validates at compile time that all required dependencies are provided
+     * within each @Module. Missing non-nullable dependencies without default values
+     * will cause a compilation error.
+     * Set to false to disable validation (e.g., when dependencies are provided by external modules).
+     */
+    val safetyChecks: Property<Boolean> = objectFactory.property(Boolean::class.java).convention(true)
 }

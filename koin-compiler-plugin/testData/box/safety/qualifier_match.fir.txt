@@ -1,0 +1,53 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class TestModule : R|kotlin/Any| {
+        public constructor(): R|TestModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public abstract interface Cache : R|kotlin/Any| {
+    }
+    @R|org/koin/core/annotation/Singleton|() @R|org/koin/core/annotation/Named|(value = String(local)) public final class LocalCache : R|Cache| {
+        public constructor(): R|LocalCache| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() @R|org/koin/core/annotation/Named|(value = String(remote)) public final class RemoteCache : R|Cache| {
+        public constructor(): R|RemoteCache| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class CacheManager : R|kotlin/Any| {
+        public constructor(@R|org/koin/core/annotation/Named|(value = String(local)) local: R|Cache|, @R|org/koin/core/annotation/Named|(value = String(remote)) remote: R|Cache|): R|CacheManager| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val local: R|Cache| = R|<local>/local|
+            public get(): R|Cache|
+
+        public final val remote: R|Cache| = R|<local>/remote|
+            public get(): R|Cache|
+
+    }
+    public final fun box(): R|kotlin/String| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|/TestModule.TestModule|().R|/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        lval manager: R|CacheManager| = R|<local>/koin|.R|org/koin/core/Koin.get|<R|CacheManager|>()
+        lval localOk: R|kotlin/Boolean| = (R|<local>/manager|.R|/CacheManager.local| is R|LocalCache|)
+        lval remoteOk: R|kotlin/Boolean| = (R|<local>/manager|.R|/CacheManager.remote| is R|RemoteCache|)
+        ^box when () {
+            R|<local>/localOk| && R|<local>/remoteOk| ->  {
+                String(OK)
+            }
+            else ->  {
+                <strcat>(String(FAIL: local=), R|<local>/localOk|, String(, remote=), R|<local>/remoteOk|)
+            }
+        }
+
+    }
+FILE: /testModuleModule.kt
+    public final fun R|TestModule|.module(): R|org/koin/core/module/Module|

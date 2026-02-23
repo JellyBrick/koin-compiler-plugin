@@ -1,7 +1,5 @@
 package org.koin.compiler.plugin
 
-import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import kotlin.test.assertTrue
 
@@ -15,16 +13,9 @@ class KoinConfigurationRegistryTest {
 
     private val testId = System.nanoTime().toString()
 
-    @BeforeEach
-    fun setUp() {
-        // Clear before each test, but note that other tests may have added entries
-        KoinConfigurationRegistry.clear()
-    }
-
-    @AfterEach
-    fun tearDown() {
-        KoinConfigurationRegistry.clear()
-    }
+    // No clear() in setUp/tearDown: compiler box tests run in the same JVM and write to
+    // the same System property. Clearing here can race with their FIR phase.
+    // All tests use unique testId suffixes so they don't depend on a clean slate.
 
     @Test
     fun `register module with default label`() {

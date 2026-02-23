@@ -24,6 +24,9 @@ object KoinPluginConstants {
     /** Option to skip injection for parameters with default values. */
     const val OPTION_SKIP_DEFAULT_VALUES = "skipDefaultValues"
 
+    /** Option to enable compile-time dependency safety checks. */
+    const val OPTION_SAFETY_CHECKS = "safetyChecks"
+
     // ================================================================================
     // Definition Types - Used for hint functions and logging
     // ================================================================================
