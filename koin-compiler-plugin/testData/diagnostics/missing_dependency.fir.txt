@@ -1,0 +1,33 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class TestModule : R|kotlin/Any| {
+        public constructor(): R|TestModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class Repository : R|kotlin/Any| {
+        public constructor(): R|Repository| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Singleton|() public final class Service : R|kotlin/Any| {
+        public constructor(repo: R|Repository|, missing: R|MissingDep|): R|Service| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val repo: R|Repository| = R|<local>/repo|
+            public get(): R|Repository|
+
+        public final val missing: R|MissingDep| = R|<local>/missing|
+            public get(): R|MissingDep|
+
+    }
+    public final class MissingDep : R|kotlin/Any| {
+        public constructor(): R|MissingDep| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+FILE: /testModuleModule.kt
+    public final fun R|TestModule|.module(): R|org/koin/core/module/Module|

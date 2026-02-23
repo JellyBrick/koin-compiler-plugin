@@ -19,4 +19,10 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   public void testAllFilesPresentInDiagnostics() {
     KtTestUtil.assertAllTestsPresentByMetadataWithExcluded(this.getClass(), new File("koin-compiler-plugin/testData/diagnostics"), Pattern.compile("^(.+)\\.kt$"), null, true);
   }
+
+  @Test
+  @TestMetadata("missing_dependency.kt")
+  public void testMissing_dependency() {
+    runTest("koin-compiler-plugin/testData/diagnostics/missing_dependency.kt");
+  }
 }
