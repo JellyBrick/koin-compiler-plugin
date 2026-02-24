@@ -15,10 +15,16 @@ class KoinIrExtension : IrGenerationExtension {
         val hintBodyGenerator = KoinHintTransformer(pluginContext)
         moduleFragment.transform(hintBodyGenerator, null)
 
+        // Shared qualifier extractor and optional safety validator
+        val qualifierExtractor = QualifierExtractor(pluginContext)
+        val safetyValidator = if (KoinPluginLogger.safetyChecksEnabled) {
+            CompileSafetyValidator(qualifierExtractor)
+        } else null
+
         // Phase 1: Process @Module/@ComponentScan/@Singleton/@Factory annotations
         // Generates: fun MyModule.module() = module { single<A>(); factory<B>() }
         KoinPluginLogger.debug { "Phase 1: Processing annotations" }
-        val annotationProcessor = KoinAnnotationProcessor(pluginContext)
+        val annotationProcessor = KoinAnnotationProcessor(pluginContext, qualifierExtractor, safetyValidator)
         annotationProcessor.collectAnnotations(moduleFragment)
         annotationProcessor.generateModuleExtensions(moduleFragment)
 
@@ -31,7 +37,7 @@ class KoinIrExtension : IrGenerationExtension {
         // Transforms: startKoin<MyApp> { printLogger() }
         // Into: startKoin { printLogger(); modules(listOf(Module1().module, ...)) }
         KoinPluginLogger.debug { "Phase 3: Transforming startKoin calls" }
-        val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor)
+        val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor, safetyValidator)
         moduleFragment.transform(startKoinTransformer, null)
 
         // Phase 4: Transform @Monitor annotated functions

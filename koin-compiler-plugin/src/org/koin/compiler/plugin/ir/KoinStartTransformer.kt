@@ -61,7 +61,8 @@ import org.jetbrains.kotlin.name.Name
 class KoinStartTransformer(
     private val context: IrPluginContext,
     private val moduleFragment: IrModuleFragment,
-    private val annotationProcessor: KoinAnnotationProcessor? = null
+    private val annotationProcessor: KoinAnnotationProcessor? = null,
+    private val safetyValidator: CompileSafetyValidator? = null
 ) : IrElementTransformerVoid() {
 
     // Koin types
@@ -110,8 +111,14 @@ class KoinStartTransformer(
         val moduleClasses = extractModulesFromKoinApplicationAnnotation(appClass)
 
         // A3: Validate the full assembled graph at the startKoin entry point
-        if (KoinPluginLogger.safetyChecksEnabled && moduleClasses.isNotEmpty() && annotationProcessor != null) {
-            validateFullGraph(appClass, moduleClasses)
+        if (safetyValidator != null && moduleClasses.isNotEmpty() && annotationProcessor != null) {
+            safetyValidator.validateFullGraph(
+                appClass.name.asString(),
+                moduleClasses,
+                annotationProcessor.collectedModuleClasses,
+                annotationProcessor::getDefinitionsForModule,
+                annotationProcessor::getDefinitionsForDependencyModule
+            )
         }
 
         // Log interception (guard to avoid precomputation when logging is disabled)
@@ -403,63 +410,6 @@ class KoinStartTransformer(
             is IrClassReference -> (expression.classType.classifierOrNull as? IrClassSymbol)?.owner
             is IrGetClass -> (expression.argument.type.classifierOrNull as? IrClassSymbol)?.owner
             else -> null
-        }
-    }
-
-    /**
-     * A3: Validate the full assembled module graph at the startKoin entry point.
-     *
-     * Collects ALL definitions from ALL discovered modules and validates that
-     * every required dependency is satisfied somewhere in the combined graph.
-     */
-    private fun validateFullGraph(appClass: IrClass, allModuleIrClasses: List<IrClass>) {
-        val processor = annotationProcessor ?: return
-        val appName = appClass.name.asString()
-
-        // Collect definitions from all modules in the graph
-        var hasUnresolvableModules = false
-        val allDefinitions = mutableListOf<Definition>()
-        for (moduleIrClass in allModuleIrClasses) {
-            val moduleClass = processor.collectedModuleClasses.find {
-                it.irClass.fqNameWhenAvailable == moduleIrClass.fqNameWhenAvailable
-            }
-            if (moduleClass != null) {
-                // Local module — collect all definitions (includes cross-module hints)
-                allDefinitions.addAll(processor.getDefinitionsForModule(moduleClass))
-            } else {
-                // Cross-module @Configuration module from dependency JAR
-                val moduleFqName = moduleIrClass.fqNameWhenAvailable?.asString() ?: continue
-                KoinPluginLogger.debug { "  -> A3: resolving dependency module $moduleFqName" }
-                val crossModuleDefs = processor.getDefinitionsForDependencyModule(moduleFqName)
-                if (crossModuleDefs.isEmpty()) {
-                    // Module's definitions can't be fully discovered (no hints for locally-scanned classes)
-                    hasUnresolvableModules = true
-                    KoinPluginLogger.debug { "  -> A3: $moduleFqName has 0 discoverable definitions (unresolvable)" }
-                } else {
-                    KoinPluginLogger.debug { "  -> A3: $moduleFqName contributed ${crossModuleDefs.size} definitions" }
-                }
-                allDefinitions.addAll(crossModuleDefs)
-            }
-        }
-
-        if (allDefinitions.isEmpty()) return
-
-        if (hasUnresolvableModules) {
-            KoinPluginLogger.debug { "  -> Full-graph validation for $appName: skipped (some modules not fully resolvable from hints)" }
-            return
-        }
-
-        KoinPluginLogger.debug { "  -> Full-graph validation for $appName: ${allDefinitions.size} definitions from ${allModuleIrClasses.size} modules" }
-
-        val bindingRegistry = BindingRegistry()
-        val errorCount = bindingRegistry.validateModule(
-            "$appName (startKoin)",
-            allDefinitions,
-            processor.parameterAnalyzer,
-            processor.qualifierExtractor
-        )
-        if (errorCount > 0) {
-            KoinPluginLogger.debug { "  -> Full-graph validation found $errorCount errors" }
         }
     }
 

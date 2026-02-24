@@ -51,11 +51,10 @@ import org.koin.compiler.plugin.fir.KoinModuleFirGenerator
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 @Suppress("DEPRECATION", "DEPRECATION_ERROR")
 class KoinAnnotationProcessor(
-    private val context: IrPluginContext
+    private val context: IrPluginContext,
+    private val qualifierExtractor: QualifierExtractor,
+    private val safetyValidator: CompileSafetyValidator? = null
 ) {
-
-    // Qualifier extraction helper (internal for cross-phase validation)
-    internal val qualifierExtractor = QualifierExtractor(context)
 
     // Argument generator for lambda parameters
     private val argumentGenerator = KoinArgumentGenerator(context, qualifierExtractor)
@@ -68,10 +67,6 @@ class KoinAnnotationProcessor(
 
     // Definition call builder helper
     private val definitionCallBuilder = DefinitionCallBuilder(context, qualifierExtractor, lambdaBuilder, argumentGenerator)
-
-    // Safety check helpers (internal for cross-phase validation)
-    internal val parameterAnalyzer = ParameterAnalyzer(qualifierExtractor)
-    private val bindingRegistry = BindingRegistry()
 
     // Annotation FQNames - use centralized registry
     private val moduleFqName = KoinAnnotationFqNames.MODULE
@@ -138,8 +133,8 @@ class KoinAnnotationProcessor(
         return collectAllDefinitions(moduleClass)
     }
 
-    /** Get definitions from a dependency JAR module (for A3 cross-module validation). */
-    fun getDefinitionsForDependencyModule(moduleFqName: String): List<Definition> {
+    /** Get definitions from a dependency JAR module (for cross-module validation). */
+    internal fun getDefinitionsForDependencyModule(moduleFqName: String): List<Definition> {
         return collectDefinitionsFromDependencyModule(moduleFqName)
     }
 
@@ -675,74 +670,12 @@ class KoinAnnotationProcessor(
             }
 
             // Compile-time safety: validate that all dependencies are satisfied within this module
-            if (KoinPluginLogger.safetyChecksEnabled && definitions.isNotEmpty()) {
-                val moduleName = moduleClass.irClass.name.asString()
-                val isConfigurationModule = hasConfigurationAnnotation(moduleClass.irClass)
-                var hasUnresolvableSiblings = false
-                // Non-@Configuration modules that discover cross-module definitions (from hints)
-                // are part of a multi-module graph. Their dependencies may be provided by
-                // @Configuration siblings or parent modules, so standalone A2 validation
-                // would produce false positives. Defer to A3 (startKoin) for full-graph validation.
-                val hasCrossModuleDefinitions = definitions.any { def ->
-                    when (def) {
-                        is Definition.ExternalFunctionDef -> true
-                        is Definition.ClassDef -> {
-                            // A class def from hints won't be in the local definitionClasses
-                            definitionClasses.none { it.irClass.fqNameWhenAvailable == def.irClass.fqNameWhenAvailable }
-                        }
-                        else -> false
-                    }
-                }
-                if (!isConfigurationModule && hasCrossModuleDefinitions) {
-                    KoinPluginLogger.debug { "  Safety check for $moduleName: deferred to A3 (non-@Configuration module with cross-module definitions)" }
-                } else {
-                    // Include definitions from included modules (transitive availability at runtime)
-                    val allVisibleDefinitions = buildList {
-                        addAll(definitions)
-                        // A1: Explicit includes
-                        for (includedModuleClass in moduleClass.includedModules) {
-                            val includedModule = moduleClasses.find {
-                                it.irClass.fqNameWhenAvailable == includedModuleClass.fqNameWhenAvailable
-                            }
-                            if (includedModule != null) {
-                                addAll(collectAllDefinitions(includedModule))
-                            }
-                        }
-                        // A2: If this module is @Configuration, include sibling modules from the same group
-                        val configLabels = extractConfigurationLabels(moduleClass.irClass)
-                        if (configLabels.isNotEmpty()) {
-                            val siblingModuleNames = KoinConfigurationRegistry.getModuleClassNamesForLabels(configLabels)
-                            KoinPluginLogger.debug { "  A2: $moduleName labels=$configLabels, registry has ${siblingModuleNames.size} siblings" }
-                            for (siblingName in siblingModuleNames) {
-                                val siblingModule = moduleClasses.find {
-                                    it.irClass.fqNameWhenAvailable?.asString() == siblingName
-                                }
-                                if (siblingModule != null && siblingModule != moduleClass) {
-                                    // Local sibling — collect all its definitions
-                                    addAll(collectAllDefinitions(siblingModule))
-                                } else if (siblingModule == null) {
-                                    // Cross-Gradle-module sibling — resolve from dependency JAR
-                                    KoinPluginLogger.debug { "    A2 resolving cross-module sibling: $siblingName" }
-                                    val crossModuleDefs = collectDefinitionsFromDependencyModule(siblingName)
-                                    KoinPluginLogger.debug { "    -> got ${crossModuleDefs.size} definitions" }
-                                    if (crossModuleDefs.isEmpty()) {
-                                        hasUnresolvableSiblings = true
-                                    }
-                                    addAll(crossModuleDefs)
-                                }
-                            }
-                        }
-                    }
-                    // If some @Configuration siblings are in different Gradle modules and their
-                    // definitions can't be discovered (no hints for locally-scanned classes,
-                    // class not on classpath), skip per-module validation. The full-graph
-                    // validation (A3: startKoin<T>) will catch real missing dependencies.
-                    if (!hasUnresolvableSiblings) {
-                        bindingRegistry.validateModule(moduleName, allVisibleDefinitions, parameterAnalyzer, qualifierExtractor)
-                    } else {
-                        KoinPluginLogger.debug { "  Safety check for $moduleName: deferred to A3 (cross-module siblings not fully resolvable)" }
-                    }
-                }
+            if (safetyValidator != null && definitions.isNotEmpty()) {
+                safetyValidator.validateModule(
+                    moduleClass, definitions, moduleClasses,
+                    ::collectAllDefinitions, definitionClasses,
+                    ::collectDefinitionsFromDependencyModule
+                )
             }
 
             // Check if FIR generated a function for this module (even if no local definitions)
