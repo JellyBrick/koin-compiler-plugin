@@ -30,6 +30,8 @@ class MyService(val repo: Repository)
 | `@Named("x")` param, no matching qualifier | **ERROR** — with hint if unqualified binding exists |
 | Scoped dependency from wrong scope | **ERROR** |
 | Default value param with `@Named` qualifier | **ERROR** — qualifier forces injection |
+| `@Provided` type, no definition | OK — externally provided at runtime |
+| Android framework type (e.g. `Context`) | OK — hardcoded whitelist |
 
 ## Validation Scopes
 
@@ -106,6 +108,44 @@ For A3 validation, the application name is used:
   in module: MyApp (startKoin)
 ```
 
+## External Types: `@Provided` and Whitelist
+
+Some types are provided by the platform or framework at runtime (e.g., Android's `Context`, `SavedStateHandle`) and are never declared as Koin definitions. Without special handling, these would trigger false "missing dependency" errors.
+
+Two mechanisms prevent this:
+
+### `@Provided` Annotation
+
+Mark a type as externally available at runtime. The safety checker skips it during validation.
+
+```kotlin
+@Provided
+class SavedStateHandle  // always available via Android framework
+
+@Singleton
+class MyViewModel(val handle: SavedStateHandle)
+// No error — SavedStateHandle is @Provided
+```
+
+`@Provided` is collected during Phase 1 annotation scanning and stored in `ProvidedTypeRegistry`.
+
+### Hardcoded Framework Whitelist
+
+Common Android framework types are always skipped, without requiring `@Provided`:
+
+| Type | Source |
+|------|--------|
+| `android.content.Context` | Android core |
+| `android.app.Activity` | Android core |
+| `android.app.Application` | Android core |
+| `androidx.fragment.app.Fragment` | AndroidX |
+| `androidx.lifecycle.SavedStateHandle` | AndroidX |
+| `androidx.work.WorkerParameters` | AndroidX |
+
+The whitelist is defined in `BindingRegistry.WHITELISTED_TYPES`.
+
+Both `@Provided` and the whitelist are checked before reporting a missing dependency. If either matches, the type is considered satisfied.
+
 ## Configuration
 
 ```kotlin
@@ -126,7 +166,7 @@ Validation runs during the IR phase (Phase 1: `KoinAnnotationProcessor`), after 
 
 ```
 IR Phase 1: KoinAnnotationProcessor
-  ├── collectAnnotations()              → discover @Module, @Singleton, etc.
+  ├── collectAnnotations()              → discover @Module, @Singleton, @Provided, etc.
   ├── generateModuleExtensions()        → for each module:
   │   ├── collect local definitions
   │   ├── collect cross-module definitions (hints)
@@ -195,6 +235,7 @@ validateModule(moduleName, definitions, parameterAnalyzer, qualifierExtractor)
   │   For each definition → for each constructor parameter:
   │     ├── ParameterAnalyzer classifies it as Requirement
   │     ├── Requirement.requiresValidation() filters out safe params
+  │     ├── skip if @Provided (ProvidedTypeRegistry) or whitelisted (WHITELISTED_TYPES)
   │     └── findProvider() searches the provided set
   │         ├── match by FqName or ClassId
   │         ├── match qualifier (StringQualifier or TypeQualifier)
@@ -221,6 +262,10 @@ Classification rules:
 - `T?` → `isNullable=true` → skip validation
 - Default value + no qualifier + `skipDefaultValues` → skip validation
 - Everything else → **requires validation**
+
+### ProvidedTypeRegistry (`ProvidedTypeRegistry.kt`)
+
+Stores FQ names of types annotated with `@Provided`. Checked during validation alongside the hardcoded whitelist. Populated during Phase 1 (`collectAnnotations()`), cleared between compilation units.
 
 ### QualifierExtractor (`ir/QualifierExtractor.kt`)
 

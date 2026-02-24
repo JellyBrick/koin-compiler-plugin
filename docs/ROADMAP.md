@@ -120,6 +120,8 @@ Detect missing dependencies at compile time instead of runtime crashes.
 - [x] Configuration group validation (A2): `@Configuration` sibling modules share definitions
 - [x] startKoin full-graph validation (A3): validates all modules assembled by `startKoin<T>()`
 - [x] Cross-Gradle-module validation (C): definitions from dependency JARs via hint functions
+- [x] `@Provided` annotation: marks types as externally available, skips safety validation
+- [x] Android framework whitelist: `Context`, `Activity`, `Application`, `Fragment`, `SavedStateHandle`, `WorkerParameters`
 - [ ] Cross-module function hint metadata (C2): encode additional metadata in hint parameter names
   - [ ] Qualifier propagation: `@Named`/`@Qualifier` (currently always `null`)
   - [ ] Scope propagation: `@Scope(MyScope::class)` (currently appears as root-scope)

@@ -35,12 +35,13 @@ koin-compiler-plugin/
 |------|---------|
 | `ir/KoinDSLTransformer.kt` | Transforms `single<T>()`, `factory<T>()`, `viewModel<T>()`, `worker<T>()`, `scoped<T>()`, `create(::T)` |
 | `ir/KoinStartTransformer.kt` | Transforms `startKoin<T>()`, `koinApplication<T>()`, `koinConfiguration<T>()`, `withConfiguration<T>()` |
-| `ir/KoinAnnotationProcessor.kt` | Processes `@Module`, `@ComponentScan`, `@Singleton`, `@PropertyValue` annotations |
+| `ir/KoinAnnotationProcessor.kt` | Processes `@Module`, `@ComponentScan`, `@Singleton`, `@PropertyValue`, `@Provided` annotations |
 | `ir/KoinIrExtension.kt` | Plugin entry point, orchestrates IR phases |
 | `ir/LambdaBuilder.kt` | Creates lambda expressions with proper scope/parameter handling |
 | `ir/ScopeBlockBuilder.kt` | Builds `scope { }` DSL blocks |
 | `ir/QualifierExtractor.kt` | Extracts qualifier annotations (`@Named`, `@Qualifier`) |
 | `PropertyValueRegistry.kt` | Stores `@PropertyValue` defaults for property injection |
+| `ProvidedTypeRegistry.kt` | Stores `@Provided` types (skipped during safety validation) |
 | `KoinPluginConstants.kt` | Shared constants (definition types, hint prefixes, option keys) |
 | `KoinAnnotationFqNames.kt` | Centralized registry of all annotation FQNames |
 | `fir/KoinModuleFirGenerator.kt` | Generates `fun T.module()` extension functions |
@@ -111,6 +112,7 @@ fun provideHttpClient(): NetworkClient = OkHttpClient()
 | `@InjectedParam` | Uses `ParametersHolder.get()` |
 | `@Property("key")` | Injects property value |
 | `@PropertyValue("key")` | Provides default value for `@Property` |
+| `@Provided` | Marks type as externally available (skips safety validation) |
 
 ## Build Commands
 
