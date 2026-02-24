@@ -693,7 +693,15 @@ class KoinAnnotationProcessor(
                                 it.irClass.fqNameWhenAvailable?.asString() == siblingName
                             }
                             if (siblingModule != null && siblingModule != moduleClass) {
+                                // Local sibling — collect all its definitions
                                 addAll(collectAllDefinitions(siblingModule))
+                            } else if (siblingModule == null) {
+                                // Cross-Gradle-module sibling — resolve from dependency JAR
+                                val crossModuleDefs = collectDefinitionsFromDependencyModule(siblingName)
+                                if (crossModuleDefs.isNotEmpty()) {
+                                    KoinPluginLogger.debug { "  A2 cross-module: found ${crossModuleDefs.size} definitions from $siblingName" }
+                                    addAll(crossModuleDefs)
+                                }
                             }
                         }
                     }
@@ -1217,6 +1225,69 @@ class KoinAnnotationProcessor(
             irClass.hasAnnotation(fragmentScopeFqName) -> ScopeArchetype.FRAGMENT_SCOPE
             else -> null
         }
+    }
+
+    /**
+     * Collect definitions from a @Configuration module in a dependency JAR.
+     * Used for cross-Gradle-module A2 validation: when a sibling @Configuration module
+     * is not in the current compilation unit, resolve it from the dependency and
+     * extract its function definitions + scanned class definitions.
+     *
+     * @param moduleFqName Fully qualified name of the module class
+     * @return List of definitions visible from this dependency module
+     */
+    private fun collectDefinitionsFromDependencyModule(moduleFqName: String): List<Definition> {
+        val moduleClassId = ClassId.topLevel(FqName(moduleFqName))
+        val moduleClassSymbol = context.referenceClass(moduleClassId) ?: return emptyList()
+        val moduleIrClass = moduleClassSymbol.owner
+
+        KoinPluginLogger.debug { "  Resolving cross-module @Configuration sibling: $moduleFqName" }
+
+        val definitions = mutableListOf<Definition>()
+
+        // 1. Extract function definitions from the module class (e.g., @Singleton fun providesXxx(): Xxx)
+        val moduleFunctions = collectDefinitionFunctions(moduleIrClass)
+        for (defFunc in moduleFunctions) {
+            definitions.add(Definition.FunctionDef(
+                defFunc.irFunction,
+                moduleIrClass,
+                defFunc.definitionType,
+                defFunc.returnTypeClass,
+                emptyList(), // bindings
+                defFunc.scopeClass,
+                defFunc.scopeArchetype,
+                defFunc.createdAtStart
+            ))
+        }
+
+        // 2. If the module has @ComponentScan, include class definitions from hints
+        //    (scanned classes from the dependency module's packages)
+        val scanPackages = getComponentScanPackages(moduleIrClass)
+        if (scanPackages.isNotEmpty() || moduleIrClass.hasAnnotation(componentScanFqName)) {
+            val effectiveScanPackages = scanPackages.ifEmpty {
+                listOf(moduleIrClass.packageFqName?.asString() ?: "")
+            }
+            val crossModuleClasses = discoverDefinitionsFromHints(effectiveScanPackages)
+            definitions.addAll(crossModuleClasses.map { defClass ->
+                Definition.ClassDef(
+                    defClass.irClass,
+                    defClass.definitionType,
+                    defClass.bindings,
+                    defClass.scopeClass,
+                    defClass.scopeArchetype,
+                    defClass.createdAtStart
+                )
+            })
+            // Also include top-level function definitions from hints
+            val crossModuleFunctions = discoverFunctionDefinitionsFromHints(effectiveScanPackages)
+            definitions.addAll(crossModuleFunctions)
+        }
+
+        if (definitions.isNotEmpty()) {
+            KoinPluginLogger.debug { "    -> Found ${definitions.size} definitions (${moduleFunctions.size} module functions)" }
+        }
+
+        return definitions
     }
 
     private fun buildModuleCall(
