@@ -123,3 +123,18 @@ sealed class Definition {
 enum class DefinitionType {
     SINGLE, FACTORY, SCOPED, VIEW_MODEL, WORKER
 }
+
+/**
+ * Result of resolving definitions from a dependency JAR module.
+ *
+ * @param definitions The discovered definitions
+ * @param isComplete Whether we could fully resolve all the module's definitions.
+ *   - true: Module has no @ComponentScan (function-only, fully resolved from JAR),
+ *     or its @ComponentScan was registered by FIR in the current compilation.
+ *   - false: Module class couldn't be resolved, or it has @ComponentScan from a different
+ *     compilation unit whose scanned classes may not have hints.
+ */
+data class DependencyModuleResult(
+    val definitions: List<Definition>,
+    val isComplete: Boolean
+)

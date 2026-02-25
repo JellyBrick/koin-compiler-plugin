@@ -46,7 +46,7 @@ class CompileSafetyValidator(
         allLocalModuleClasses: List<ModuleClass>,
         collectAllDefinitions: (ModuleClass) -> List<Definition>,
         localDefinitionClasses: List<DefinitionClass>,
-        collectDefinitionsFromDependencyModule: (String) -> List<Definition>
+        collectDefinitionsFromDependencyModule: (String) -> DependencyModuleResult
     ) {
         val moduleName = moduleClass.irClass.name.asString()
         val isConfigurationModule = hasConfigurationAnnotation(moduleClass.irClass)
@@ -98,12 +98,12 @@ class CompileSafetyValidator(
                     } else if (siblingModule == null) {
                         // Cross-Gradle-module sibling — resolve from dependency JAR
                         KoinPluginLogger.debug { "    A2 resolving cross-module sibling: $siblingName" }
-                        val crossModuleDefs = collectDefinitionsFromDependencyModule(siblingName)
-                        KoinPluginLogger.debug { "    -> got ${crossModuleDefs.size} definitions" }
-                        if (crossModuleDefs.isEmpty()) {
+                        val result = collectDefinitionsFromDependencyModule(siblingName)
+                        KoinPluginLogger.debug { "    -> got ${result.definitions.size} definitions (complete=${result.isComplete})" }
+                        if (!result.isComplete) {
                             hasUnresolvableSiblings = true
                         }
-                        addAll(crossModuleDefs)
+                        addAll(result.definitions)
                     }
                 }
             }
@@ -137,7 +137,7 @@ class CompileSafetyValidator(
         allModuleIrClasses: List<IrClass>,
         collectedModuleClasses: List<ModuleClass>,
         getDefinitionsForModule: (ModuleClass) -> List<Definition>,
-        getDefinitionsForDependencyModule: (String) -> List<Definition>
+        getDefinitionsForDependencyModule: (String) -> DependencyModuleResult
     ) {
         // Collect definitions from all modules in the graph
         var hasUnresolvableModules = false
@@ -153,15 +153,14 @@ class CompileSafetyValidator(
                 // Cross-module @Configuration module from dependency JAR
                 val moduleFqName = moduleIrClass.fqNameWhenAvailable?.asString() ?: continue
                 KoinPluginLogger.debug { "  -> A3: resolving dependency module $moduleFqName" }
-                val crossModuleDefs = getDefinitionsForDependencyModule(moduleFqName)
-                if (crossModuleDefs.isEmpty()) {
-                    // Module's definitions can't be fully discovered (no hints for locally-scanned classes)
+                val result = getDefinitionsForDependencyModule(moduleFqName)
+                if (!result.isComplete) {
                     hasUnresolvableModules = true
-                    KoinPluginLogger.debug { "  -> A3: $moduleFqName has 0 discoverable definitions (unresolvable)" }
+                    KoinPluginLogger.debug { "  -> A3: $moduleFqName not fully resolvable (has @ComponentScan from different compilation)" }
                 } else {
-                    KoinPluginLogger.debug { "  -> A3: $moduleFqName contributed ${crossModuleDefs.size} definitions" }
+                    KoinPluginLogger.debug { "  -> A3: $moduleFqName contributed ${result.definitions.size} definitions (complete)" }
                 }
-                allDefinitions.addAll(crossModuleDefs)
+                allDefinitions.addAll(result.definitions)
             }
         }
 

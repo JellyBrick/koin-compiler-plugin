@@ -134,7 +134,7 @@ class KoinAnnotationProcessor(
     }
 
     /** Get definitions from a dependency JAR module (for cross-module validation). */
-    internal fun getDefinitionsForDependencyModule(moduleFqName: String): List<Definition> {
+    internal fun getDefinitionsForDependencyModule(moduleFqName: String): DependencyModuleResult {
         return collectDefinitionsFromDependencyModule(moduleFqName)
     }
 
@@ -1197,90 +1197,94 @@ class KoinAnnotationProcessor(
     }
 
     /**
-     * Collect definitions from a @Configuration module in a dependency JAR.
-     * Used for cross-Gradle-module A2 validation: when a sibling @Configuration module
-     * is not in the current compilation unit, resolve it from the dependency and
-     * extract its function definitions + scanned class definitions.
+     * Collect definitions from a module in a dependency JAR.
+     *
+     * A @Module without @ComponentScan only declares function definitions — these are always
+     * fully resolvable from the JAR. A @Module with @ComponentScan also gathers definitions
+     * from scanned packages, which may not have hints and can't be fully discovered.
      *
      * @param moduleFqName Fully qualified name of the module class
-     * @return List of definitions visible from this dependency module
+     * @return Result with definitions and completeness flag
      */
-    private fun collectDefinitionsFromDependencyModule(moduleFqName: String): List<Definition> {
+    internal fun collectDefinitionsFromDependencyModule(moduleFqName: String): DependencyModuleResult {
         val definitions = mutableListOf<Definition>()
         val moduleClassId = ClassId.topLevel(FqName(moduleFqName))
         val moduleClassSymbol = context.referenceClass(moduleClassId)
 
-        if (moduleClassSymbol != null) {
-            val moduleIrClass = moduleClassSymbol.owner
-            KoinPluginLogger.debug { "      Resolved class $moduleFqName, declarations: ${moduleIrClass.declarations.size}" }
-
-            // 1. Extract function definitions from the module class (e.g., @Singleton fun providesXxx(): Xxx)
-            val moduleFunctions = collectDefinitionFunctions(moduleIrClass)
-            KoinPluginLogger.debug { "      Module functions: ${moduleFunctions.size} (${moduleFunctions.joinToString { it.irFunction.name.asString() }})" }
-            for (defFunc in moduleFunctions) {
-                definitions.add(Definition.FunctionDef(
-                    defFunc.irFunction,
-                    moduleIrClass,
-                    defFunc.definitionType,
-                    defFunc.returnTypeClass,
-                    emptyList(), // bindings
-                    defFunc.scopeClass,
-                    defFunc.scopeArchetype,
-                    defFunc.createdAtStart
-                ))
-            }
-
-            // 2. If the module has @ComponentScan, include class/function definitions from hints.
-            //    Read scan packages from registry (populated by FIR in same compilation unit) or
-            //    fall back to module's own package (the default @ComponentScan behavior).
-            val registeredScanPackages = KoinConfigurationRegistry.getScanPackages(moduleFqName)
-            val scanPackages = registeredScanPackages
-                ?: run {
-                    // No registered scan packages — module is from a different compilation unit.
-                    // Fall back to module's own package as default @ComponentScan target.
-                    listOf(moduleIrClass.packageFqName?.asString() ?: "")
-                }
-            val effectiveScanPackages = scanPackages.ifEmpty {
-                listOf(moduleIrClass.packageFqName?.asString() ?: "")
-            }
-            val crossModuleClasses = discoverDefinitionsFromHints(effectiveScanPackages)
-            definitions.addAll(crossModuleClasses.map { defClass ->
-                Definition.ClassDef(
-                    defClass.irClass,
-                    defClass.definitionType,
-                    defClass.bindings,
-                    defClass.scopeClass,
-                    defClass.scopeArchetype,
-                    defClass.createdAtStart
-                )
-            })
-            val crossModuleFunctions = discoverFunctionDefinitionsFromHints(effectiveScanPackages)
-            definitions.addAll(crossModuleFunctions)
-        } else {
-            // Module class not on classpath — can't resolve its declarations.
-            // Try to discover its definitions through hints using its package as scan scope.
+        if (moduleClassSymbol == null) {
+            // Module class not on classpath — can't resolve. Try hints as best-effort.
             val modulePackage = FqName(moduleFqName).parent().asString()
             KoinPluginLogger.debug { "      Cannot resolve $moduleFqName, using package $modulePackage for hint discovery" }
-            val crossModuleClasses = discoverDefinitionsFromHints(listOf(modulePackage))
-            definitions.addAll(crossModuleClasses.map { defClass ->
-                Definition.ClassDef(
-                    defClass.irClass,
-                    defClass.definitionType,
-                    defClass.bindings,
-                    defClass.scopeClass,
-                    defClass.scopeArchetype,
-                    defClass.createdAtStart
-                )
-            })
-            val crossModuleFunctions = discoverFunctionDefinitionsFromHints(listOf(modulePackage))
-            definitions.addAll(crossModuleFunctions)
+            definitions.addAll(discoverClassDefinitionsFromHints(listOf(modulePackage)))
+            definitions.addAll(discoverFunctionDefinitionsFromHints(listOf(modulePackage)))
+            return DependencyModuleResult(definitions, isComplete = false)
+        }
+
+        val moduleIrClass = moduleClassSymbol.owner
+        KoinPluginLogger.debug { "      Resolved class $moduleFqName, declarations: ${moduleIrClass.declarations.size}" }
+
+        // 1. Extract function definitions from the module class (e.g., @Singleton fun providesXxx(): Xxx)
+        //    A @Module without @ComponentScan only has these — they're always fully resolvable.
+        val moduleFunctions = collectDefinitionFunctions(moduleIrClass)
+        KoinPluginLogger.debug { "      Module functions: ${moduleFunctions.size} (${moduleFunctions.joinToString { it.irFunction.name.asString() }})" }
+        for (defFunc in moduleFunctions) {
+            definitions.add(Definition.FunctionDef(
+                defFunc.irFunction,
+                moduleIrClass,
+                defFunc.definitionType,
+                defFunc.returnTypeClass,
+                emptyList(), // bindings
+                defFunc.scopeClass,
+                defFunc.scopeArchetype,
+                defFunc.createdAtStart
+            ))
+        }
+
+        // 2. Check if the module has @ComponentScan (registered by FIR in same compilation unit).
+        //    If no scan packages registered, the module either has no @ComponentScan or is from
+        //    a different compilation unit. In either case, its function defs are all we can get
+        //    and that's complete for a function-only module.
+        val registeredScanPackages = KoinConfigurationRegistry.getScanPackages(moduleFqName)
+        if (registeredScanPackages != null) {
+            // Module has @ComponentScan — discover scanned definitions from hints
+            val effectiveScanPackages = registeredScanPackages.ifEmpty {
+                listOf(moduleIrClass.packageFqName?.asString() ?: "")
+            }
+            definitions.addAll(discoverClassDefinitionsFromHints(effectiveScanPackages))
+            definitions.addAll(discoverFunctionDefinitionsFromHints(effectiveScanPackages))
         }
 
         if (definitions.isNotEmpty()) {
-            KoinPluginLogger.debug { "    -> Found ${definitions.size} definitions from $moduleFqName" }
+            KoinPluginLogger.debug { "    -> Found ${definitions.size} definitions from $moduleFqName (hasComponentScan=${registeredScanPackages != null})" }
         }
 
-        return definitions
+        // Complete if we could determine the module's shape:
+        // - registeredScanPackages != null → FIR registered this module's @ComponentScan in the current
+        //   compilation, so we know its scan packages and used hints to discover scanned definitions.
+        // - registeredScanPackages == null → Either the module has no @ComponentScan (function-only,
+        //   fully resolved from JAR), OR it's from a different Gradle module compilation and we can't
+        //   tell if it has @ComponentScan. We check the @ComponentScan annotation directly on the class.
+        val hasComponentScan = moduleIrClass.annotations.any {
+            it.type.classFqName?.asString() == "org.koin.core.annotation.ComponentScan"
+        }
+        val isComplete = registeredScanPackages != null || !hasComponentScan
+        return DependencyModuleResult(definitions, isComplete)
+    }
+
+    /**
+     * Discover class definitions from hints and convert to Definition.ClassDef.
+     */
+    private fun discoverClassDefinitionsFromHints(scanPackages: List<String>): List<Definition.ClassDef> {
+        return discoverDefinitionsFromHints(scanPackages).map { defClass ->
+            Definition.ClassDef(
+                defClass.irClass,
+                defClass.definitionType,
+                defClass.bindings,
+                defClass.scopeClass,
+                defClass.scopeArchetype,
+                defClass.createdAtStart
+            )
+        }
     }
 
     private fun buildModuleCall(
