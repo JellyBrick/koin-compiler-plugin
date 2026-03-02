@@ -274,7 +274,7 @@ class BindingRegistry {
 
     private fun qualifiersMatch(required: QualifierValue?, provided: QualifierValue?): Boolean {
         if (required == null && provided == null) return true
-        if (required == null || provided == null) return required == null && provided == null
+        if (required == null || provided == null) return false
         return when {
             required is QualifierValue.StringQualifier && provided is QualifierValue.StringQualifier ->
                 required.name == provided.name

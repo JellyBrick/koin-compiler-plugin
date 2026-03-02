@@ -77,57 +77,16 @@ class KoinAnnotationProcessor(
     // Definition call builder helper
     private val definitionCallBuilder = DefinitionCallBuilder(context, qualifierExtractor, lambdaBuilder, argumentGenerator)
 
-    // Annotation FQNames - use centralized registry
-    private val moduleFqName = KoinAnnotationFqNames.MODULE
-    private val componentScanFqName = KoinAnnotationFqNames.COMPONENT_SCAN
-    private val singletonFqName = KoinAnnotationFqNames.SINGLETON
-    private val singleFqName = KoinAnnotationFqNames.SINGLE
-    private val factoryFqName = KoinAnnotationFqNames.FACTORY
-    private val scopedFqName = KoinAnnotationFqNames.SCOPED
-    private val scopeAnnotationFqName = KoinAnnotationFqNames.SCOPE
-    private val koinViewModelFqName = KoinAnnotationFqNames.KOIN_VIEW_MODEL
-    private val koinWorkerFqName = KoinAnnotationFqNames.KOIN_WORKER
-    private val namedAnnotationFqName = KoinAnnotationFqNames.NAMED
-    private val qualifierAnnotationFqName = KoinAnnotationFqNames.QUALIFIER
-    private val injectedParamAnnotationFqName = KoinAnnotationFqNames.INJECTED_PARAM
-    private val propertyAnnotationFqName = KoinAnnotationFqNames.PROPERTY
-    private val propertyValueAnnotationFqName = KoinAnnotationFqNames.PROPERTY_VALUE
-    private val providedAnnotationFqName = KoinAnnotationFqNames.PROVIDED
-
-    // Scope archetype annotations
-    private val viewModelScopeFqName = KoinAnnotationFqNames.VIEW_MODEL_SCOPE
-    private val activityScopeFqName = KoinAnnotationFqNames.ACTIVITY_SCOPE
-    private val activityRetainedScopeFqName = KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE
-    private val fragmentScopeFqName = KoinAnnotationFqNames.FRAGMENT_SCOPE
-
-    // JSR-330 (jakarta.inject) annotations
-    private val jakartaSingletonFqName = KoinAnnotationFqNames.JAKARTA_SINGLETON
-    private val jakartaNamedFqName = KoinAnnotationFqNames.JAKARTA_NAMED
-    private val jakartaInjectFqName = KoinAnnotationFqNames.JAKARTA_INJECT
-    private val jakartaQualifierFqName = KoinAnnotationFqNames.JAKARTA_QUALIFIER
-
-    // JSR-330 (javax.inject) annotations - legacy package still used by many projects
-    private val javaxSingletonFqName = KoinAnnotationFqNames.JAVAX_SINGLETON
-    private val javaxNamedFqName = KoinAnnotationFqNames.JAVAX_NAMED
-    private val javaxInjectFqName = KoinAnnotationFqNames.JAVAX_INJECT
-    private val javaxQualifierFqName = KoinAnnotationFqNames.JAVAX_QUALIFIER
-
-    // Koin DSL FQNames
-    private val koinModuleFqName = KoinAnnotationFqNames.KOIN_MODULE
-    private val moduleDslFqName = KoinAnnotationFqNames.MODULE_DSL
-    private val scopeFqName = KoinAnnotationFqNames.SCOPE_CLASS
-    private val parametersHolderFqName = KoinAnnotationFqNames.PARAMETERS_HOLDER
-
     // Cached class lookups (avoid repeated context.referenceClass calls)
     private val kClassClass by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.KCLASS))?.owner }
     private val function1Class by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.FUNCTION1))?.owner }
     private val function2Class by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.FUNCTION2))?.owner }
     private val scopeDslClass by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.SCOPE_DSL))?.owner }
-    private val koinModuleClass by lazy { context.referenceClass(ClassId.topLevel(koinModuleFqName))?.owner }
-    private val scopeClassCached by lazy { context.referenceClass(ClassId.topLevel(scopeFqName))?.owner }
-    private val parametersHolderClass by lazy { context.referenceClass(ClassId.topLevel(parametersHolderFqName))?.owner }
+    private val koinModuleClass by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.KOIN_MODULE))?.owner }
+    private val scopeClassCached by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.SCOPE_CLASS))?.owner }
+    private val parametersHolderClass by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.PARAMETERS_HOLDER))?.owner }
     private val lazyModeClass by lazy { context.referenceClass(ClassId.topLevel(FqName("kotlin.LazyThreadSafetyMode"))) }
-    private val koinModuleClassSymbol by lazy { context.referenceClass(ClassId.topLevel(koinModuleFqName)) }
+    private val koinModuleClassSymbol by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.KOIN_MODULE)) }
 
     // Collected data (types defined in AnnotationModels.kt)
     private val moduleClasses = mutableListOf<ModuleClass>()
@@ -139,24 +98,29 @@ class KoinAnnotationProcessor(
 
     /** Get all definitions for a module (local + cross-module via hints + included modules). */
     fun getDefinitionsForModule(moduleClass: ModuleClass): List<Definition> {
-        val definitions = collectAllDefinitions(moduleClass).toMutableList()
+        val definitions = (cachedModuleDefinitions?.get(moduleClass) ?: collectAllDefinitions(moduleClass)).toMutableList()
+
+        // Track visited modules to prevent infinite recursion on circular includes
+        val visited = mutableSetOf<String>()
+        moduleClass.irClass.fqNameWhenAvailable?.asString()?.let { visited.add(it) }
 
         // Follow @Module(includes = [...]) to collect included module definitions.
         // Included modules may not be @Configuration, so they won't appear in the top-level
         // module list. We must collect their definitions here for A3 full-graph validation.
+        val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toMutableSet()
         for (included in moduleClass.includedModules) {
             val includedFqName = included.fqNameWhenAvailable?.asString() ?: continue
             val localIncluded = collectedModuleClasses.find {
                 it.irClass.fqNameWhenAvailable == included.fqNameWhenAvailable
             }
-            val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toSet()
-            if (localIncluded != null) {
-                val includedDefs = collectAllDefinitions(localIncluded)
-                definitions.addAll(includedDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames })
+            val newDefs = if (localIncluded != null) {
+                collectAllDefinitions(localIncluded).filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
             } else {
-                val result = collectDefinitionsFromDependencyModule(includedFqName)
-                definitions.addAll(result.definitions.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames })
+                collectDefinitionsFromDependencyModule(includedFqName, visited).definitions
+                    .filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
             }
+            definitions.addAll(newDefs)
+            existingFqNames.addAll(newDefs.mapNotNull { it.returnTypeClass.fqNameWhenAvailable })
         }
 
         return definitions
@@ -210,20 +174,20 @@ class KoinAnnotationProcessor(
     private fun processPropertyValue(declaration: IrProperty) {
         // Check property annotations
         var propertyValueAnnotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == propertyValueAnnotationFqName.asString()
+            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.PROPERTY_VALUE.asString()
         }
 
         // Also check backing field annotations (annotations might be stored there)
         if (propertyValueAnnotation == null) {
             propertyValueAnnotation = declaration.backingField?.annotations?.firstOrNull { annotation ->
-                annotation.type.classFqName?.asString() == propertyValueAnnotationFqName.asString()
+                annotation.type.classFqName?.asString() == KoinAnnotationFqNames.PROPERTY_VALUE.asString()
             }
         }
 
         // Also check getter annotations
         if (propertyValueAnnotation == null) {
             propertyValueAnnotation = declaration.getter?.annotations?.firstOrNull { annotation ->
-                annotation.type.classFqName?.asString() == propertyValueAnnotationFqName.asString()
+                annotation.type.classFqName?.asString() == KoinAnnotationFqNames.PROPERTY_VALUE.asString()
             }
         }
 
@@ -242,8 +206,8 @@ class KoinAnnotationProcessor(
     }
 
     private fun processClass(declaration: IrClass) {
-        val hasModule = declaration.hasAnnotation(moduleFqName)
-        val hasComponentScan = declaration.hasAnnotation(componentScanFqName)
+        val hasModule = declaration.hasAnnotation(KoinAnnotationFqNames.MODULE)
+        val hasComponentScan = declaration.hasAnnotation(KoinAnnotationFqNames.COMPONENT_SCAN)
 
         if (hasModule) {
             // @Module with or without @ComponentScan
@@ -278,7 +242,7 @@ class KoinAnnotationProcessor(
         }
 
         // Check for @Provided annotation — marks a type as externally available
-        if (declaration.hasAnnotation(providedAnnotationFqName)) {
+        if (declaration.hasAnnotation(KoinAnnotationFqNames.PROVIDED)) {
             val fqName = declaration.fqNameWhenAvailable?.asString()
             if (fqName != null) {
                 ProvidedTypeRegistry.register(fqName)
@@ -314,30 +278,7 @@ class KoinAnnotationProcessor(
                 scopeClass, scopeArchetype, createdAtStart
             ))
 
-            // Log definition annotation discovery (guard to avoid precomputation when logging is disabled)
-            if (KoinPluginLogger.userLogsEnabled) {
-                val annotationName = getDefinitionAnnotationName(declaration) ?: finalDefinitionType.name
-                KoinPluginLogger.user { "@$annotationName on class ${declaration.name}" }
-                if (scopeArchetype != null) {
-                    KoinPluginLogger.user { "  Scope archetype: @${scopeArchetype.name}" }
-                }
-                if (scopeClass != null) {
-                    KoinPluginLogger.user { "  @Scope(${scopeClass.name}::class)" }
-                }
-                if (bindings.isNotEmpty()) {
-                    KoinPluginLogger.user { "  Binds: ${bindings.joinToString(", ") { it.name.asString() }}" }
-                }
-                if (createdAtStart) {
-                    KoinPluginLogger.user { "  createdAtStart = true" }
-                }
-                // Log qualifier on class
-                val qualifier = qualifierExtractor.extractFromDeclaration(declaration)
-                when (qualifier) {
-                    is QualifierValue.StringQualifier -> KoinPluginLogger.user { "  @Named(\"${qualifier.name}\")" }
-                    is QualifierValue.TypeQualifier -> KoinPluginLogger.user { "  @Qualifier(${qualifier.irClass.name}::class)" }
-                    null -> {}
-                }
-            }
+            logDefinitionDiscovery(declaration, finalDefinitionType, scopeArchetype, scopeClass, bindings, createdAtStart, "class ${declaration.name}")
         }
     }
 
@@ -361,29 +302,7 @@ class KoinAnnotationProcessor(
             bindings, scopeClass, scopeArchetype, createdAtStart
         ))
 
-        // Log definition annotation discovery
-        if (KoinPluginLogger.userLogsEnabled) {
-            val annotationName = getDefinitionAnnotationName(declaration) ?: definitionType.name
-            KoinPluginLogger.user { "@$annotationName on function ${declaration.name}() -> ${returnTypeClass.name}" }
-            if (scopeArchetype != null) {
-                KoinPluginLogger.user { "  Scope archetype: @${scopeArchetype.name}" }
-            }
-            if (scopeClass != null) {
-                KoinPluginLogger.user { "  @Scope(${scopeClass.name}::class)" }
-            }
-            if (bindings.isNotEmpty()) {
-                KoinPluginLogger.user { "  Binds: ${bindings.joinToString(", ") { it.name.asString() }}" }
-            }
-            if (createdAtStart) {
-                KoinPluginLogger.user { "  createdAtStart = true" }
-            }
-            val qualifier = qualifierExtractor.extractFromDeclaration(declaration)
-            when (qualifier) {
-                is QualifierValue.StringQualifier -> KoinPluginLogger.user { "  @Named(\"${qualifier.name}\")" }
-                is QualifierValue.TypeQualifier -> KoinPluginLogger.user { "  @Qualifier(${qualifier.irClass.name}::class)" }
-                null -> {}
-            }
-        }
+        logDefinitionDiscovery(declaration, definitionType, scopeArchetype, scopeClass, bindings, createdAtStart, "function ${declaration.name}() -> ${returnTypeClass.name}")
     }
 
     /**
@@ -391,24 +310,58 @@ class KoinAnnotationProcessor(
      */
     private fun getDefinitionAnnotationName(declaration: IrDeclaration): String? {
         return when {
-            declaration.hasAnnotation(singletonFqName) -> "Singleton"
-            declaration.hasAnnotation(singleFqName) -> "Single"
-            declaration.hasAnnotation(factoryFqName) -> "Factory"
-            declaration.hasAnnotation(scopedFqName) -> "Scoped"
-            declaration.hasAnnotation(koinViewModelFqName) -> "KoinViewModel"
-            declaration.hasAnnotation(koinWorkerFqName) -> "KoinWorker"
+            declaration.hasAnnotation(KoinAnnotationFqNames.SINGLETON) -> "Singleton"
+            declaration.hasAnnotation(KoinAnnotationFqNames.SINGLE) -> "Single"
+            declaration.hasAnnotation(KoinAnnotationFqNames.FACTORY) -> "Factory"
+            declaration.hasAnnotation(KoinAnnotationFqNames.SCOPED) -> "Scoped"
+            declaration.hasAnnotation(KoinAnnotationFqNames.KOIN_VIEW_MODEL) -> "KoinViewModel"
+            declaration.hasAnnotation(KoinAnnotationFqNames.KOIN_WORKER) -> "KoinWorker"
             // Scope archetype annotations
-            declaration.hasAnnotation(viewModelScopeFqName) -> "ViewModelScope"
-            declaration.hasAnnotation(activityScopeFqName) -> "ActivityScope"
-            declaration.hasAnnotation(activityRetainedScopeFqName) -> "ActivityRetainedScope"
-            declaration.hasAnnotation(fragmentScopeFqName) -> "FragmentScope"
-            declaration.hasAnnotation(jakartaSingletonFqName) -> "jakarta.inject.Singleton"
-            declaration.hasAnnotation(jakartaInjectFqName) -> "jakarta.inject.Inject"
-            declaration.hasAnnotation(javaxSingletonFqName) -> "javax.inject.Singleton"
-            declaration.hasAnnotation(javaxInjectFqName) -> "javax.inject.Inject"
+            declaration.hasAnnotation(KoinAnnotationFqNames.VIEW_MODEL_SCOPE) -> "ViewModelScope"
+            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_SCOPE) -> "ActivityScope"
+            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE) -> "ActivityRetainedScope"
+            declaration.hasAnnotation(KoinAnnotationFqNames.FRAGMENT_SCOPE) -> "FragmentScope"
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAKARTA_SINGLETON) -> "jakarta.inject.Singleton"
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAKARTA_INJECT) -> "jakarta.inject.Inject"
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAVAX_SINGLETON) -> "javax.inject.Singleton"
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAVAX_INJECT) -> "javax.inject.Inject"
             // JSR-330: @Inject on constructor
             declaration is IrClass && hasInjectConstructor(declaration) -> "Inject constructor"
             else -> null
+        }
+    }
+
+    /** Log definition annotation discovery details at user log level. */
+    private fun logDefinitionDiscovery(
+        declaration: IrDeclaration,
+        definitionType: DefinitionType,
+        scopeArchetype: ScopeArchetype?,
+        scopeClass: IrClass?,
+        bindings: List<IrClass>,
+        createdAtStart: Boolean,
+        targetName: String? = null
+    ) {
+        if (!KoinPluginLogger.userLogsEnabled) return
+        val annotationName = getDefinitionAnnotationName(declaration) ?: definitionType.name
+        val name = targetName ?: (declaration as? IrDeclarationWithName)?.name?.asString() ?: "unknown"
+        KoinPluginLogger.user { "@$annotationName on $name" }
+        if (scopeArchetype != null) {
+            KoinPluginLogger.user { "  Scope archetype: @${scopeArchetype.name}" }
+        }
+        if (scopeClass != null) {
+            KoinPluginLogger.user { "  @Scope(${scopeClass.name}::class)" }
+        }
+        if (bindings.isNotEmpty()) {
+            KoinPluginLogger.user { "  Binds: ${bindings.joinToString(", ") { it.name.asString() }}" }
+        }
+        if (createdAtStart) {
+            KoinPluginLogger.user { "  createdAtStart = true" }
+        }
+        val qualifier = qualifierExtractor.extractFromDeclaration(declaration)
+        when (qualifier) {
+            is QualifierValue.StringQualifier -> KoinPluginLogger.user { "  @Named(\"${qualifier.name}\")" }
+            is QualifierValue.TypeQualifier -> KoinPluginLogger.user { "  @Qualifier(${qualifier.irClass.name}::class)" }
+            null -> {}
         }
     }
 
@@ -418,7 +371,7 @@ class KoinAnnotationProcessor(
      */
     private fun getScopeClass(declaration: IrDeclaration): IrClass? {
         val scopeAnnotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == scopeAnnotationFqName.asString()
+            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.SCOPE.asString()
         } ?: return null
 
         val valueArg = scopeAnnotation.getValueArgument(0)
@@ -431,23 +384,23 @@ class KoinAnnotationProcessor(
     private fun getDefinitionType(declaration: IrDeclaration): DefinitionType? {
         return when {
             // Koin annotations
-            declaration.hasAnnotation(singletonFqName) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(singleFqName) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(factoryFqName) -> DefinitionType.FACTORY
-            declaration.hasAnnotation(scopedFqName) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(koinViewModelFqName) -> DefinitionType.VIEW_MODEL
-            declaration.hasAnnotation(koinWorkerFqName) -> DefinitionType.WORKER
+            declaration.hasAnnotation(KoinAnnotationFqNames.SINGLETON) -> DefinitionType.SINGLE
+            declaration.hasAnnotation(KoinAnnotationFqNames.SINGLE) -> DefinitionType.SINGLE
+            declaration.hasAnnotation(KoinAnnotationFqNames.FACTORY) -> DefinitionType.FACTORY
+            declaration.hasAnnotation(KoinAnnotationFqNames.SCOPED) -> DefinitionType.SCOPED
+            declaration.hasAnnotation(KoinAnnotationFqNames.KOIN_VIEW_MODEL) -> DefinitionType.VIEW_MODEL
+            declaration.hasAnnotation(KoinAnnotationFqNames.KOIN_WORKER) -> DefinitionType.WORKER
             // Scope archetype annotations imply SCOPED definition
-            declaration.hasAnnotation(viewModelScopeFqName) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(activityScopeFqName) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(activityRetainedScopeFqName) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(fragmentScopeFqName) -> DefinitionType.SCOPED
+            declaration.hasAnnotation(KoinAnnotationFqNames.VIEW_MODEL_SCOPE) -> DefinitionType.SCOPED
+            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_SCOPE) -> DefinitionType.SCOPED
+            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE) -> DefinitionType.SCOPED
+            declaration.hasAnnotation(KoinAnnotationFqNames.FRAGMENT_SCOPE) -> DefinitionType.SCOPED
             // JSR-330 annotations (jakarta.inject)
-            declaration.hasAnnotation(jakartaSingletonFqName) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(jakartaInjectFqName) -> DefinitionType.FACTORY // @Inject on class generates factory
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAKARTA_SINGLETON) -> DefinitionType.SINGLE
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAKARTA_INJECT) -> DefinitionType.FACTORY // @Inject on class generates factory
             // JSR-330 annotations (javax.inject) - legacy package
-            declaration.hasAnnotation(javaxSingletonFqName) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(javaxInjectFqName) -> DefinitionType.FACTORY // @Inject on class generates factory
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAVAX_SINGLETON) -> DefinitionType.SINGLE
+            declaration.hasAnnotation(KoinAnnotationFqNames.JAVAX_INJECT) -> DefinitionType.FACTORY // @Inject on class generates factory
             // JSR-330: @Inject on constructor also generates factory
             declaration is IrClass && hasInjectConstructor(declaration) -> DefinitionType.FACTORY
             else -> null
@@ -463,7 +416,7 @@ class KoinAnnotationProcessor(
             .any { constructor ->
                 constructor.annotations.any { annotation ->
                     val fqName = annotation.type.classFqName?.asString()
-                    fqName == jakartaInjectFqName.asString() || fqName == javaxInjectFqName.asString()
+                    fqName == KoinAnnotationFqNames.JAKARTA_INJECT.asString() || fqName == KoinAnnotationFqNames.JAVAX_INJECT.asString()
                 }
             }
     }
@@ -474,10 +427,10 @@ class KoinAnnotationProcessor(
      */
     private fun getScopeArchetype(declaration: IrDeclaration): ScopeArchetype? {
         return when {
-            declaration.hasAnnotation(viewModelScopeFqName) -> ScopeArchetype.VIEW_MODEL_SCOPE
-            declaration.hasAnnotation(activityScopeFqName) -> ScopeArchetype.ACTIVITY_SCOPE
-            declaration.hasAnnotation(activityRetainedScopeFqName) -> ScopeArchetype.ACTIVITY_RETAINED_SCOPE
-            declaration.hasAnnotation(fragmentScopeFqName) -> ScopeArchetype.FRAGMENT_SCOPE
+            declaration.hasAnnotation(KoinAnnotationFqNames.VIEW_MODEL_SCOPE) -> ScopeArchetype.VIEW_MODEL_SCOPE
+            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_SCOPE) -> ScopeArchetype.ACTIVITY_SCOPE
+            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE) -> ScopeArchetype.ACTIVITY_RETAINED_SCOPE
+            declaration.hasAnnotation(KoinAnnotationFqNames.FRAGMENT_SCOPE) -> ScopeArchetype.FRAGMENT_SCOPE
             else -> null
         }
     }
@@ -488,7 +441,7 @@ class KoinAnnotationProcessor(
     private fun getCreatedAtStart(declaration: IrDeclaration): Boolean {
         val annotation = declaration.annotations.firstOrNull { annotation ->
             val fqName = annotation.type.classFqName?.asString()
-            fqName == singletonFqName.asString() || fqName == singleFqName.asString()
+            fqName == KoinAnnotationFqNames.SINGLETON.asString() || fqName == KoinAnnotationFqNames.SINGLE.asString()
         } ?: return false
 
         // createdAtStart is usually the second parameter (index 1) after binds
@@ -505,7 +458,7 @@ class KoinAnnotationProcessor(
      * Get explicit bindings from @Single(binds = [...]) or @Factory(binds = [...])
      */
     private fun getExplicitBindings(declaration: IrDeclaration): List<IrClass> {
-        val definitionAnnotations = listOf(singletonFqName, singleFqName, factoryFqName, scopedFqName, koinViewModelFqName, koinWorkerFqName)
+        val definitionAnnotations = listOf(KoinAnnotationFqNames.SINGLETON, KoinAnnotationFqNames.SINGLE, KoinAnnotationFqNames.FACTORY, KoinAnnotationFqNames.SCOPED, KoinAnnotationFqNames.KOIN_VIEW_MODEL, KoinAnnotationFqNames.KOIN_WORKER)
 
         val annotation = declaration.annotations.firstOrNull { annotation ->
             definitionAnnotations.any { it.asString() == annotation.type.classFqName?.asString() }
@@ -530,6 +483,12 @@ class KoinAnnotationProcessor(
         return emptyList()
     }
 
+    /**
+     * Custom hasAnnotation that resolves via [IrType.classFqName] (string comparison).
+     * The stdlib [org.jetbrains.kotlin.ir.util.hasAnnotation] uses `symbol.owner.classId`
+     * which may not resolve correctly for all IR constructs when deprecated-for-removal APIs
+     * are involved. This version is safer for our annotation matching needs.
+     */
     private fun IrDeclaration.hasAnnotation(fqName: FqName): Boolean {
         return annotations.any { annotation ->
             annotation.type.classFqName?.asString() == fqName.asString()
@@ -546,28 +505,11 @@ class KoinAnnotationProcessor(
                 val defType = getDefinitionType(function) ?: return@mapNotNull null
                 val returnType = function.returnType
                 val returnTypeClass = (returnType.classifierOrNull?.owner as? IrClass) ?: return@mapNotNull null
-                val scopeClass = getScopeClassFromDeclaration(function)
+                val scopeClass = getScopeClass(function)
                 val scopeArchetype = getScopeArchetype(function)
                 val createdAtStart = getCreatedAtStart(function)
                 DefinitionFunction(function, defType, returnTypeClass, scopeClass, scopeArchetype, createdAtStart)
             }
-    }
-
-    /**
-     * Get scope class from @Scope annotation on any declaration (class or function)
-     */
-    private fun getScopeClassFromDeclaration(declaration: IrDeclarationWithName): IrClass? {
-        val scopeAnnotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == scopeAnnotationFqName.asString()
-        } ?: return null
-
-        // @Scope(value = ScopeClass::class)
-        val valueArg = scopeAnnotation.getValueArgument(0)
-        if (valueArg is IrClassReferenceImpl) {
-            return valueArg.classType.classifierOrNull?.owner as? IrClass
-        }
-
-        return null
     }
 
     /**
@@ -595,7 +537,7 @@ class KoinAnnotationProcessor(
 
     private fun getComponentScanPackages(declaration: IrClass): List<String> {
         val annotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == componentScanFqName.asString()
+            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.COMPONENT_SCAN.asString()
         } ?: return emptyList()
 
         val valueArg = annotation.getValueArgument(0)
@@ -616,7 +558,7 @@ class KoinAnnotationProcessor(
      */
     private fun getModuleIncludes(declaration: IrClass): List<IrClass> {
         val annotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == moduleFqName.asString()
+            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.MODULE.asString()
         } ?: return emptyList()
 
         // Find the "includes" parameter (usually index 0 for @Module)
@@ -636,6 +578,9 @@ class KoinAnnotationProcessor(
     // Store module fragment for later use in buildIncludesCall
     private var currentModuleFragment: IrModuleFragment? = null
 
+    // Cache for collectAllDefinitions results (populated in generateModuleExtensions, reused in getDefinitionsForModule)
+    private var cachedModuleDefinitions: Map<ModuleClass, List<Definition>>? = null
+
     /**
      * Phase 2: Generate module extension functions in IR
      *
@@ -652,6 +597,7 @@ class KoinAnnotationProcessor(
 
         // Step 1: Pre-collect definitions for every module
         val moduleDefinitions = moduleClasses.associateWith { collectAllDefinitions(it) }
+        cachedModuleDefinitions = moduleDefinitions
 
         // Step 1b: Generate module-scoped component scan hints for downstream visibility.
         // This replaces the FIR-time generation: IR has complete knowledge of all definitions
@@ -661,6 +607,15 @@ class KoinAnnotationProcessor(
 
         // Map to track functions for each module class (FIR-generated or newly created)
         val moduleFunctions = mutableMapOf<ModuleClass, IrSimpleFunction>()
+
+        // Pre-compute which modules are included by other modules (for A2 validation skip).
+        // A module included by another will be validated as part of the parent's visibility set.
+        val includedModuleFqNames = mutableSetOf<FqName?>()
+        for (mc in moduleClasses) {
+            for (included in mc.includedModules) {
+                includedModuleFqNames.add(included.fqNameWhenAvailable)
+            }
+        }
 
         // Step 2: For each module, build visibility + validate + generate
         for (moduleClass in moduleClasses) {
@@ -710,11 +665,7 @@ class KoinAnnotationProcessor(
             // Compile-time safety: build full visibility set and validate.
             // Skip A2 for modules that are included by another local module — they'll
             // be validated as part of the parent's visibility set (or at A3).
-            val isIncludedByOtherModule = moduleClasses.any { other ->
-                other != moduleClass && other.includedModules.any {
-                    it.fqNameWhenAvailable == moduleClass.irClass.fqNameWhenAvailable
-                }
-            }
+            val isIncludedByOtherModule = moduleClass.irClass.fqNameWhenAvailable in includedModuleFqNames
             if (safetyValidator != null && definitions.isNotEmpty() && !isIncludedByOtherModule) {
                 val allVisibleDefinitions = buildVisibleDefinitions(moduleClass, definitions, moduleDefinitions)
                 val moduleFqName = moduleClass.irClass.fqNameWhenAvailable?.asString()
@@ -1166,7 +1117,7 @@ class KoinAnnotationProcessor(
         KoinPluginLogger.debug { "    -> Generating module body with ${definitions.size} definitions" }
 
         val moduleDslFunction = context.referenceFunctions(
-            CallableId(moduleDslFqName, Name.identifier("module"))
+            CallableId(KoinAnnotationFqNames.MODULE_DSL, Name.identifier("module"))
         ).firstOrNull { it.owner.valueParameters.any { p ->
             p.name.asString() == "moduleDeclaration"
         }}?.owner
@@ -1241,7 +1192,7 @@ class KoinAnnotationProcessor(
                 moduleClass.irClass,
                 defFunc.definitionType,
                 defFunc.returnTypeClass,
-                emptyList(), // bindings - TODO: extract from function annotation
+                emptyList(), // bindings — function definitions don't yet support explicit binds
                 defFunc.scopeClass, // Scope class from @Scope annotation
                 defFunc.scopeArchetype, // Scope archetype from @ViewModelScope, @ActivityScope, etc.
                 defFunc.createdAtStart
@@ -1293,19 +1244,13 @@ class KoinAnnotationProcessor(
 
         // If @ComponentScan has no value, scan current package and subpackages
         // If @ComponentScan has values, scan only those packages and their subpackages
-        val scanPackages = moduleClass.scanPackages.ifEmpty {
-            listOf(moduleClass.irClass.packageFqName?.asString() ?: "")
-        }
+        val scanPackages = moduleClass.effectiveScanPackages()
 
         KoinPluginLogger.debug { "  Scanning packages: ${scanPackages.joinToString(", ")} (recursive)" }
 
         // Local definitions from current compilation unit
         val localDefinitions = definitionClasses.filter { definition ->
-            val defPackage = definition.packageFqName.asString()
-            // Match package or any subpackage (recursive: io.koin matches io.koin.feature1, io.koin.feature1.sub, etc.)
-            scanPackages.any { scanPkg ->
-                defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
-            }
+            matchesScanPackages(definition.packageFqName.asString(), scanPackages)
         }
 
         // Cross-module definitions from hints (definitions from other Gradle modules)
@@ -1335,15 +1280,10 @@ class KoinAnnotationProcessor(
             return emptyList()
         }
 
-        val scanPackages = moduleClass.scanPackages.ifEmpty {
-            listOf(moduleClass.irClass.packageFqName?.asString() ?: "")
-        }
+        val scanPackages = moduleClass.effectiveScanPackages()
 
         val matchingFunctions = definitionTopLevelFunctions.filter { definition ->
-            val defPackage = definition.packageFqName.asString()
-            scanPackages.any { scanPkg ->
-                defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
-            }
+            matchesScanPackages(definition.packageFqName.asString(), scanPackages)
         }
 
         if (KoinPluginLogger.userLogsEnabled && matchingFunctions.isNotEmpty()) {
@@ -1371,7 +1311,7 @@ class KoinAnnotationProcessor(
                 CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, functionName)
             )
 
-            KoinPluginLogger.debug { "  Querying hints: $functionName -> ${hintFunctions.toList().size} functions" }
+            KoinPluginLogger.debug { "  Querying hints: $functionName -> ${hintFunctions.count()} functions" }
 
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
@@ -1381,11 +1321,7 @@ class KoinAnnotationProcessor(
 
                 // Check if the class's package matches scan packages
                 val defPackage = defClass.packageFqName?.asString() ?: continue
-                val matchesScanPackage = scanPackages.any { scanPkg ->
-                    defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
-                }
-
-                if (!matchesScanPackage) continue
+                if (!matchesScanPackages(defPackage, scanPackages)) continue
 
                 // Skip if we already have this class in local definitions (avoid duplicates)
                 if (definitionClasses.any { it.irClass.fqNameWhenAvailable == defClass.fqNameWhenAvailable }) {
@@ -1394,14 +1330,7 @@ class KoinAnnotationProcessor(
                 }
 
                 // Convert hint type to DefinitionType
-                val definitionType = when (defType) {
-                    KoinModuleFirGenerator.DEF_TYPE_SINGLE -> DefinitionType.SINGLE
-                    KoinModuleFirGenerator.DEF_TYPE_FACTORY -> DefinitionType.FACTORY
-                    KoinModuleFirGenerator.DEF_TYPE_SCOPED -> DefinitionType.SCOPED
-                    KoinModuleFirGenerator.DEF_TYPE_VIEWMODEL -> DefinitionType.VIEW_MODEL
-                    KoinModuleFirGenerator.DEF_TYPE_WORKER -> DefinitionType.WORKER
-                    else -> continue
-                }
+                val definitionType = parseDefinitionType(defType) ?: continue
 
                 // Extract bindings and other metadata from the class annotations
                 val bindings = detectBindings(defClass) + getExplicitBindings(defClass)
@@ -1416,7 +1345,7 @@ class KoinAnnotationProcessor(
                     packageFqName = FqName(defPackage),
                     bindings = bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass = scopeClass,
-                    scopeArchetype = getScopeArchetypeFromClass(defClass),
+                    scopeArchetype = getScopeArchetype(defClass),
                     createdAtStart = createdAtStart
                 ))
             }
@@ -1444,7 +1373,7 @@ class KoinAnnotationProcessor(
                 CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, functionName)
             )
 
-            KoinPluginLogger.debug { "  Querying function hints: $functionName -> ${hintFunctions.toList().size} functions" }
+            KoinPluginLogger.debug { "  Querying function hints: $functionName -> ${hintFunctions.count()} functions" }
 
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
@@ -1454,11 +1383,7 @@ class KoinAnnotationProcessor(
 
                 // Check if the class's package matches scan packages
                 val defPackage = returnTypeClass.packageFqName?.asString() ?: continue
-                val matchesScanPackage = scanPackages.any { scanPkg ->
-                    defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
-                }
-
-                if (!matchesScanPackage) continue
+                if (!matchesScanPackages(defPackage, scanPackages)) continue
 
                 // Skip if we already have this type in local top-level function definitions
                 if (definitionTopLevelFunctions.any { it.returnTypeClass.fqNameWhenAvailable == returnTypeClass.fqNameWhenAvailable }) {
@@ -1466,14 +1391,7 @@ class KoinAnnotationProcessor(
                     continue
                 }
 
-                val definitionType = when (defType) {
-                    KoinModuleFirGenerator.DEF_TYPE_SINGLE -> DefinitionType.SINGLE
-                    KoinModuleFirGenerator.DEF_TYPE_FACTORY -> DefinitionType.FACTORY
-                    KoinModuleFirGenerator.DEF_TYPE_SCOPED -> DefinitionType.SCOPED
-                    KoinModuleFirGenerator.DEF_TYPE_VIEWMODEL -> DefinitionType.VIEW_MODEL
-                    KoinModuleFirGenerator.DEF_TYPE_WORKER -> DefinitionType.WORKER
-                    else -> continue
-                }
+                val definitionType = parseDefinitionType(defType) ?: continue
 
                 KoinPluginLogger.debug { "    Discovered function def: ${returnTypeClass.name} ($defType) from package $defPackage" }
 
@@ -1488,19 +1406,6 @@ class KoinAnnotationProcessor(
     }
 
     /**
-     * Get scope archetype from class annotations (for cross-module discovery).
-     */
-    private fun getScopeArchetypeFromClass(irClass: IrClass): ScopeArchetype? {
-        return when {
-            irClass.hasAnnotation(viewModelScopeFqName) -> ScopeArchetype.VIEW_MODEL_SCOPE
-            irClass.hasAnnotation(activityScopeFqName) -> ScopeArchetype.ACTIVITY_SCOPE
-            irClass.hasAnnotation(activityRetainedScopeFqName) -> ScopeArchetype.ACTIVITY_RETAINED_SCOPE
-            irClass.hasAnnotation(fragmentScopeFqName) -> ScopeArchetype.FRAGMENT_SCOPE
-            else -> null
-        }
-    }
-
-    /**
      * Collect definitions from a module in a dependency JAR.
      *
      * A @Module without @ComponentScan only declares function definitions — these are always
@@ -1510,7 +1415,16 @@ class KoinAnnotationProcessor(
      * @param moduleFqName Fully qualified name of the module class
      * @return Result with definitions and completeness flag
      */
-    internal fun collectDefinitionsFromDependencyModule(moduleFqName: String): DependencyModuleResult {
+    internal fun collectDefinitionsFromDependencyModule(
+        moduleFqName: String,
+        visited: MutableSet<String> = mutableSetOf()
+    ): DependencyModuleResult {
+        // Guard against circular module includes (A includes B, B includes A)
+        if (!visited.add(moduleFqName)) {
+            KoinPluginLogger.debug { "      Cycle detected: $moduleFqName already visited, skipping" }
+            return DependencyModuleResult(emptyList(), isComplete = true)
+        }
+
         val definitions = mutableListOf<Definition>()
         val moduleClassId = ClassId.topLevel(FqName(moduleFqName))
         val moduleClassSymbol = context.referenceClass(moduleClassId)
@@ -1548,7 +1462,7 @@ class KoinAnnotationProcessor(
                 moduleIrClass,
                 defFunc.definitionType,
                 defFunc.returnTypeClass,
-                emptyList(), // bindings
+                emptyList(), // bindings — function definitions don't yet support explicit binds
                 defFunc.scopeClass,
                 defFunc.scopeArchetype,
                 defFunc.createdAtStart
@@ -1586,27 +1500,26 @@ class KoinAnnotationProcessor(
         //    @Configuration, so they won't appear in the top-level module list. We must collect
         //    their definitions here to make them visible for A3 full-graph validation.
         val includedModules = getModuleIncludes(moduleIrClass)
+        val knownFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toMutableSet()
         for (included in includedModules) {
             val includedFqName = included.fqNameWhenAvailable?.asString() ?: continue
             // Check if already collected locally (avoid re-processing)
             val localModuleClass = collectedModuleClasses.find {
                 it.irClass.fqNameWhenAvailable == included.fqNameWhenAvailable
             }
-            if (localModuleClass != null) {
+            val newDefs = if (localModuleClass != null) {
                 // Included module is local — use collectAllDefinitions
                 val includedDefs = collectAllDefinitions(localModuleClass)
-                val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toSet()
-                val newDefs = includedDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
-                definitions.addAll(newDefs)
-                KoinPluginLogger.debug { "      Included (local) $includedFqName: ${newDefs.size} new definitions" }
+                includedDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in knownFqNames }
             } else {
                 // Included module from JAR — recursively collect
-                val includedResult = collectDefinitionsFromDependencyModule(includedFqName)
-                val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toSet()
-                val newDefs = includedResult.definitions.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
-                definitions.addAll(newDefs)
-                KoinPluginLogger.debug { "      Included (dependency) $includedFqName: ${newDefs.size} new definitions" }
+                val includedResult = collectDefinitionsFromDependencyModule(includedFqName, visited)
+                includedResult.definitions.filter { it.returnTypeClass.fqNameWhenAvailable !in knownFqNames }
             }
+            definitions.addAll(newDefs)
+            knownFqNames.addAll(newDefs.mapNotNull { it.returnTypeClass.fqNameWhenAvailable })
+            val source = if (localModuleClass != null) "local" else "dependency"
+            KoinPluginLogger.debug { "      Included ($source) $includedFqName: ${newDefs.size} new definitions" }
         }
 
         if (definitions.isNotEmpty()) {
@@ -1665,14 +1578,7 @@ class KoinAnnotationProcessor(
                 // Skip duplicates
                 if (definitions.any { it.returnTypeClass.fqNameWhenAvailable == defClass.fqNameWhenAvailable }) continue
 
-                val definitionType = when (defType) {
-                    KoinModuleFirGenerator.DEF_TYPE_SINGLE -> DefinitionType.SINGLE
-                    KoinModuleFirGenerator.DEF_TYPE_FACTORY -> DefinitionType.FACTORY
-                    KoinModuleFirGenerator.DEF_TYPE_SCOPED -> DefinitionType.SCOPED
-                    KoinModuleFirGenerator.DEF_TYPE_VIEWMODEL -> DefinitionType.VIEW_MODEL
-                    KoinModuleFirGenerator.DEF_TYPE_WORKER -> DefinitionType.WORKER
-                    else -> continue
-                }
+                val definitionType = parseDefinitionType(defType) ?: continue
 
                 val bindings = detectBindings(defClass) + getExplicitBindings(defClass)
                 val scopeClass = getScopeClass(defClass)
@@ -1685,7 +1591,7 @@ class KoinAnnotationProcessor(
                     definitionType,
                     bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass,
-                    getScopeArchetypeFromClass(defClass),
+                    getScopeArchetype(defClass),
                     createdAtStart
                 ))
             }
@@ -1703,14 +1609,7 @@ class KoinAnnotationProcessor(
 
                 if (definitions.any { it.returnTypeClass.fqNameWhenAvailable == returnTypeClass.fqNameWhenAvailable }) continue
 
-                val definitionType = when (defType) {
-                    KoinModuleFirGenerator.DEF_TYPE_SINGLE -> DefinitionType.SINGLE
-                    KoinModuleFirGenerator.DEF_TYPE_FACTORY -> DefinitionType.FACTORY
-                    KoinModuleFirGenerator.DEF_TYPE_SCOPED -> DefinitionType.SCOPED
-                    KoinModuleFirGenerator.DEF_TYPE_VIEWMODEL -> DefinitionType.VIEW_MODEL
-                    KoinModuleFirGenerator.DEF_TYPE_WORKER -> DefinitionType.WORKER
-                    else -> continue
-                }
+                val definitionType = parseDefinitionType(defType) ?: continue
 
                 KoinPluginLogger.debug { "        Found: ${returnTypeClass.name} ($defType) via module-scan function hint" }
 
@@ -1728,6 +1627,32 @@ class KoinAnnotationProcessor(
         return definitions
     }
 
+    /** Convert a hint definition type string to [DefinitionType]. */
+    private fun parseDefinitionType(defType: String): DefinitionType? {
+        return when (defType) {
+            KoinModuleFirGenerator.DEF_TYPE_SINGLE -> DefinitionType.SINGLE
+            KoinModuleFirGenerator.DEF_TYPE_FACTORY -> DefinitionType.FACTORY
+            KoinModuleFirGenerator.DEF_TYPE_SCOPED -> DefinitionType.SCOPED
+            KoinModuleFirGenerator.DEF_TYPE_VIEWMODEL -> DefinitionType.VIEW_MODEL
+            KoinModuleFirGenerator.DEF_TYPE_WORKER -> DefinitionType.WORKER
+            else -> null
+        }
+    }
+
+    /** Check if a package matches any of the scan packages (exact or subpackage). */
+    private fun matchesScanPackages(defPackage: String, scanPackages: List<String>): Boolean {
+        return scanPackages.any { scanPkg ->
+            defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
+        }
+    }
+
+    /** Resolve effective scan packages: explicit scan packages or default to module's own package. */
+    private fun ModuleClass.effectiveScanPackages(): List<String> {
+        return scanPackages.ifEmpty {
+            listOf(irClass.packageFqName?.asString() ?: "")
+        }
+    }
+
     /**
      * Build the full set of definitions visible to a module for validation.
      * Includes: own definitions + included modules + @Configuration siblings (local + cross-module).
@@ -1737,14 +1662,15 @@ class KoinAnnotationProcessor(
         ownDefinitions: List<Definition>,
         allModuleDefinitions: Map<ModuleClass, List<Definition>>
     ): List<Definition> {
+        // Pre-build lookup map for O(1) sibling resolution
+        val modulesByFqName = moduleClasses.associateBy { it.irClass.fqNameWhenAvailable?.asString() }
+
         return buildList {
             addAll(ownDefinitions)
 
             // A1: Explicit includes
             for (included in moduleClass.includedModules) {
-                val includedModule = moduleClasses.find {
-                    it.irClass.fqNameWhenAvailable == included.fqNameWhenAvailable
-                }
+                val includedModule = modulesByFqName[included.fqNameWhenAvailable?.asString()]
                 if (includedModule != null) {
                     addAll(allModuleDefinitions[includedModule] ?: emptyList())
                 }
@@ -1755,9 +1681,7 @@ class KoinAnnotationProcessor(
             if (configLabels.isNotEmpty()) {
                 val siblingNames = KoinConfigurationRegistry.getModuleClassNamesForLabels(configLabels)
                 for (siblingName in siblingNames) {
-                    val sibling = moduleClasses.find {
-                        it.irClass.fqNameWhenAvailable?.asString() == siblingName
-                    }
+                    val sibling = modulesByFqName[siblingName]
                     if (sibling != null && sibling != moduleClass) {
                         // Local sibling
                         addAll(allModuleDefinitions[sibling] ?: emptyList())
@@ -1777,7 +1701,7 @@ class KoinAnnotationProcessor(
         parentFunction: IrFunction,
         builder: DeclarationIrBuilder
     ): IrExpression? {
-        val moduleClass2 = koinModuleClass ?: return null
+        val koinModuleIrClass = koinModuleClass ?: return null
 
         val lambdaFunction = context.irFactory.createSimpleFunction(
             startOffset = UNDEFINED_OFFSET,
@@ -1805,7 +1729,7 @@ class KoinAnnotationProcessor(
             endOffset = UNDEFINED_OFFSET,
             origin = IrDeclarationOrigin.DEFINED,
             name = Name.special("<this>"),
-            type = moduleClass2.defaultType,
+            type = koinModuleIrClass.defaultType,
             isAssignable = false,
             symbol = IrValueParameterSymbolImpl(),
             index = -1,
@@ -1868,7 +1792,7 @@ class KoinAnnotationProcessor(
 
         val func1Class = function1Class ?: return null
 
-        val lambdaType = func1Class.typeWith(moduleClass2.defaultType, context.irBuiltIns.unitType)
+        val lambdaType = func1Class.typeWith(koinModuleIrClass.defaultType, context.irBuiltIns.unitType)
 
         val lambdaExpr = IrFunctionExpressionImpl(
             startOffset = UNDEFINED_OFFSET,
@@ -1984,7 +1908,7 @@ class KoinAnnotationProcessor(
         // Find the includes function: Module.includes(vararg Module)
         val includesFunction = context.referenceFunctions(
             CallableId(FqName("org.koin.plugin.module.dsl"), Name.identifier("includes"))
-        ).firstOrNull { it.owner.extensionReceiverParameter?.type?.classFqName?.asString() == koinModuleFqName.asString() }?.owner
+        ).firstOrNull { it.owner.extensionReceiverParameter?.type?.classFqName?.asString() == KoinAnnotationFqNames.KOIN_MODULE.asString() }?.owner
             ?: return null
 
         // Get the constructor of the included module class (or object instance)
