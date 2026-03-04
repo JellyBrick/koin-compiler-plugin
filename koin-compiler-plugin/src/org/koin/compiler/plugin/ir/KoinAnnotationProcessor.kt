@@ -134,6 +134,13 @@ class KoinAnnotationProcessor(
         return DependencyModuleResult(definitions, allComplete)
     }
 
+    /** Get all definitions across all modules (for A4 call-site validation). */
+    fun getAllKnownDefinitions(): List<Definition> {
+        return collectedModuleClasses.flatMap { moduleClass ->
+            getDefinitionsForModule(moduleClass).definitions
+        }
+    }
+
     /** Get definitions from a dependency JAR module (for cross-module validation). */
     internal fun getDefinitionsForDependencyModule(moduleFqName: String): DependencyModuleResult {
         return collectDefinitionsFromDependencyModule(moduleFqName)

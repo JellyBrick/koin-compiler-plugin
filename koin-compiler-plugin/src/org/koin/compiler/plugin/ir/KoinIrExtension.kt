@@ -44,6 +44,14 @@ class KoinIrExtension : IrGenerationExtension {
         val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor, safetyValidator)
         moduleFragment.transform(startKoinTransformer, null)
 
+        // Phase 3.5: Validate koinViewModel<T>() / koinNavViewModel<T>() call sites
+        // Checks that the resolved type T has a matching definition in any declared module
+        if (safetyValidator != null) {
+            KoinPluginLogger.debug { "Phase 3.5: Validating call-site resolutions" }
+            val callSiteValidator = KoinCallSiteValidator(annotationProcessor)
+            moduleFragment.transform(callSiteValidator, null)
+        }
+
         // Phase 4: Transform @Monitor annotated functions
         // Wraps function bodies with Kotzilla trace calls for performance monitoring
         KoinPluginLogger.debug { "Phase 4: Processing @Monitor annotations" }

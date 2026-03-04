@@ -179,6 +179,26 @@ object KoinAnnotationFqNames {
     val QUALIFIER_PACKAGE = FqName("org.koin.core.qualifier")
 
     // ================================================================================
+    // Compose ViewModel Resolution Functions (for A4 call-site validation)
+    // ================================================================================
+
+    /** org.koin.compose.viewmodel.koinViewModel - Compose ViewModel resolution. */
+    val KOIN_VIEW_MODEL_COMPOSE = FqName("org.koin.compose.viewmodel.koinViewModel")
+
+    /** org.koin.compose.viewmodel.koinNavViewModel - Compose Nav ViewModel resolution (deprecated). */
+    val KOIN_NAV_VIEW_MODEL_COMPOSE = FqName("org.koin.compose.viewmodel.koinNavViewModel")
+
+    /** org.koin.androidx.compose.navigation.koinNavViewModel - AndroidX Nav ViewModel (deprecated). */
+    val KOIN_NAV_VIEW_MODEL_ANDROIDX = FqName("org.koin.androidx.compose.navigation.koinNavViewModel")
+
+    /** All call-site resolution functions for A4 validation. */
+    val CALL_SITE_RESOLUTION_FUNCTIONS = listOf(
+        KOIN_VIEW_MODEL_COMPOSE,
+        KOIN_NAV_VIEW_MODEL_COMPOSE,
+        KOIN_NAV_VIEW_MODEL_ANDROIDX
+    )
+
+    // ================================================================================
     // Kotlin Standard Library
     // ================================================================================
 

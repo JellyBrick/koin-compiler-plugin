@@ -1,6 +1,7 @@
 package org.koin.compiler.plugin
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
+import org.jetbrains.kotlin.cli.common.messages.CompilerMessageLocation
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
@@ -120,6 +121,17 @@ object KoinPluginLogger {
      */
     fun error(message: String) {
         messageCollector.report(CompilerMessageSeverity.ERROR, "[Koin] $message")
+    }
+
+    /**
+     * Report a compilation error with source location.
+     * The error message will include file path and line number.
+     */
+    fun error(message: String, filePath: String?, line: Int, column: Int) {
+        val location = if (filePath != null) {
+            CompilerMessageLocation.create(filePath, line, column, null)
+        } else null
+        messageCollector.report(CompilerMessageSeverity.ERROR, "[Koin] $message", location)
     }
 }
 
