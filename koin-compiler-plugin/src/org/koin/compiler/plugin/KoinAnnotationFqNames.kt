@@ -179,23 +179,66 @@ object KoinAnnotationFqNames {
     val QUALIFIER_PACKAGE = FqName("org.koin.core.qualifier")
 
     // ================================================================================
-    // Compose ViewModel Resolution Functions (for A4 call-site validation)
+    // Call-Site Resolution Functions (for A4 call-site validation)
     // ================================================================================
 
-    /** org.koin.compose.viewmodel.koinViewModel - Compose ViewModel resolution. */
+    // --- compose ---
+    val KOIN_INJECT_COMPOSE = FqName("org.koin.compose.koinInject")
+
+    // --- compose-viewmodel ---
     val KOIN_VIEW_MODEL_COMPOSE = FqName("org.koin.compose.viewmodel.koinViewModel")
-
-    /** org.koin.compose.viewmodel.koinNavViewModel - Compose Nav ViewModel resolution (deprecated). */
+    val KOIN_ACTIVITY_VIEW_MODEL_COMPOSE = FqName("org.koin.compose.viewmodel.koinActivityViewModel")
     val KOIN_NAV_VIEW_MODEL_COMPOSE = FqName("org.koin.compose.viewmodel.koinNavViewModel")
+    val KOIN_SHARED_VIEW_MODEL_COMPOSE = FqName("org.koin.compose.viewmodel.sharedKoinViewModel")
 
-    /** org.koin.androidx.compose.navigation.koinNavViewModel - AndroidX Nav ViewModel (deprecated). */
+    // --- androidx-compose ---
+    val KOIN_VIEW_MODEL_ANDROIDX_COMPOSE = FqName("org.koin.androidx.compose.koinViewModel")
+
+    // --- androidx-compose-navigation ---
     val KOIN_NAV_VIEW_MODEL_ANDROIDX = FqName("org.koin.androidx.compose.navigation.koinNavViewModel")
+
+    // --- core ---
+    val KOIN_COMPONENT_GET = FqName("org.koin.core.component.get")
+    val KOIN_COMPONENT_INJECT = FqName("org.koin.core.component.inject")
+    // Note: Scope.get/inject excluded — used internally by plugin-generated code (indistinguishable from user code)
+    val KOIN_GET = FqName("org.koin.core.Koin.get")
+    val KOIN_INJECT = FqName("org.koin.core.Koin.inject")
+
+    // --- android ---
+    val ANDROID_COMPONENT_GET = FqName("org.koin.android.ext.android.get")
+    val ANDROID_COMPONENT_INJECT = FqName("org.koin.android.ext.android.inject")
+
+    // --- android-viewmodel ---
+    val ANDROID_VIEW_MODEL = FqName("org.koin.androidx.viewmodel.ext.android.viewModel")
+    val ANDROID_GET_VIEW_MODEL = FqName("org.koin.androidx.viewmodel.ext.android.getViewModel")
+    val ANDROID_ACTIVITY_VIEW_MODEL = FqName("org.koin.androidx.viewmodel.ext.android.activityViewModel")
+    val ANDROID_GET_ACTIVITY_VIEW_MODEL = FqName("org.koin.androidx.viewmodel.ext.android.getActivityViewModel")
+
+    // --- ktor ---
+    val KTOR_GET = FqName("org.koin.ktor.ext.get")
+    val KTOR_INJECT = FqName("org.koin.ktor.ext.inject")
 
     /** All call-site resolution functions for A4 validation. */
     val CALL_SITE_RESOLUTION_FUNCTIONS = listOf(
-        KOIN_VIEW_MODEL_COMPOSE,
-        KOIN_NAV_VIEW_MODEL_COMPOSE,
-        KOIN_NAV_VIEW_MODEL_ANDROIDX
+        // compose
+        KOIN_INJECT_COMPOSE,
+        // compose-viewmodel
+        KOIN_VIEW_MODEL_COMPOSE, KOIN_ACTIVITY_VIEW_MODEL_COMPOSE,
+        KOIN_NAV_VIEW_MODEL_COMPOSE, KOIN_SHARED_VIEW_MODEL_COMPOSE,
+        // androidx-compose
+        KOIN_VIEW_MODEL_ANDROIDX_COMPOSE,
+        // androidx-compose-navigation
+        KOIN_NAV_VIEW_MODEL_ANDROIDX,
+        // core
+        KOIN_COMPONENT_GET, KOIN_COMPONENT_INJECT,
+        KOIN_GET, KOIN_INJECT,
+        // android
+        ANDROID_COMPONENT_GET, ANDROID_COMPONENT_INJECT,
+        // android-viewmodel
+        ANDROID_VIEW_MODEL, ANDROID_GET_VIEW_MODEL,
+        ANDROID_ACTIVITY_VIEW_MODEL, ANDROID_GET_ACTIVITY_VIEW_MODEL,
+        // ktor
+        KTOR_GET, KTOR_INJECT
     )
 
     // ================================================================================

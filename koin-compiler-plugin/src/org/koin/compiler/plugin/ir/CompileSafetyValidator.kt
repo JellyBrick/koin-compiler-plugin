@@ -91,7 +91,8 @@ class CompileSafetyValidator(
         allModuleIrClasses: List<IrClass>,
         collectedModuleClasses: List<ModuleClass>,
         getDefinitionsForModule: (ModuleClass) -> DependencyModuleResult,
-        getDefinitionsForDependencyModule: (String) -> DependencyModuleResult
+        getDefinitionsForDependencyModule: (String) -> DependencyModuleResult,
+        dslDefinitions: List<Definition> = emptyList()
     ) {
         KoinPluginLogger.debug { "── A3 Safety: Full-graph for $appName ──" }
         KoinPluginLogger.debug { "  modules in graph: ${allModuleIrClasses.size}" }
@@ -137,6 +138,13 @@ class CompileSafetyValidator(
                     definitionsToValidate.addAll(result.definitions)
                 }
             }
+        }
+
+        // Include DSL definitions as both providers and consumers
+        if (dslDefinitions.isNotEmpty()) {
+            KoinPluginLogger.debug { "    + DSL definitions: ${dslDefinitions.size}" }
+            allDefinitions.addAll(dslDefinitions)
+            definitionsToValidate.addAll(dslDefinitions)
         }
 
         // Store assembled graph types for A4 call-site validation

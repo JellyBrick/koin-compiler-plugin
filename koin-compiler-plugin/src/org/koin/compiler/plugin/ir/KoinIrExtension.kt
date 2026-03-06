@@ -4,8 +4,12 @@ import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.incremental.components.ExpectActualTracker
 import org.jetbrains.kotlin.incremental.components.LookupTracker
+import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.types.classFqName
+import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
 import org.koin.compiler.plugin.KoinPluginLogger
+import org.koin.compiler.plugin.ProvidedTypeRegistry
 
 class KoinIrExtension(
     private val lookupTracker: LookupTracker?,
@@ -38,24 +42,27 @@ class KoinIrExtension(
         annotationProcessor.generateModuleExtensions(moduleFragment)
 
         // Phase 2: Transform single<T>() -> single(T::class, null) { T(get()) }
+        // Also collects DSL definitions and pending call-site validations
         KoinPluginLogger.debug { "Phase 2: Transforming DSL calls" }
         val koinTransformer = KoinDSLTransformer(pluginContext, lookupTracker)
         moduleFragment.transform(koinTransformer, null)
+        val dslDefinitions = koinTransformer.dslDefinitions
+        val pendingCallSites = koinTransformer.collectedCallSites
+        KoinPluginLogger.debug { "Phase 2: Collected ${dslDefinitions.size} DSL definitions, ${pendingCallSites.size} pending call sites" }
 
         // Phase 3: Transform startKoin<T> { } to inject modules()
         // Transforms: startKoin<MyApp> { printLogger() }
         // Into: startKoin { printLogger(); modules(listOf(Module1().module, ...)) }
+        // A3 full-graph validation includes DSL definitions as providers + consumers
         KoinPluginLogger.debug { "Phase 3: Transforming startKoin calls" }
-        val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor, safetyValidator, lookupTracker, expectActualTracker)
+        val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor, safetyValidator, lookupTracker, expectActualTracker, dslDefinitions)
         moduleFragment.transform(startKoinTransformer, null)
 
-        // Phase 3.5: Validate koinViewModel<T>() / koinNavViewModel<T>() call sites
-        // When A3 assembled the full graph, validates against actual runtime types.
-        // Otherwise falls back to annotation/definition heuristics.
-        if (safetyValidator != null) {
-            KoinPluginLogger.debug { "Phase 3.5: Validating call-site resolutions (graph types: ${safetyValidator.assembledGraphTypes.size})" }
-            val callSiteValidator = KoinCallSiteValidator(annotationProcessor, safetyValidator.assembledGraphTypes, lookupTracker)
-            moduleFragment.transform(callSiteValidator, null)
+        // Phase 3.5: Validate pending call sites (simple loop, no tree walk)
+        // Checks collected call sites against the assembled graph + DSL definitions
+        if (safetyValidator != null && pendingCallSites.isNotEmpty()) {
+            KoinPluginLogger.debug { "Phase 3.5: Validating ${pendingCallSites.size} call-site resolutions (graph types: ${safetyValidator.assembledGraphTypes.size})" }
+            validatePendingCallSites(pendingCallSites, safetyValidator.assembledGraphTypes, dslDefinitions, annotationProcessor)
         }
 
         // Phase 4: Transform @Monitor annotated functions
@@ -65,5 +72,82 @@ class KoinIrExtension(
         moduleFragment.transform(monitorTransformer, null)
 
         KoinPluginLogger.debug { "IR Phase completed" }
+    }
+}
+
+/**
+ * A4: Validate pending call-site resolutions against the assembled graph.
+ * Simple loop — no tree walk needed. Replaces KoinCallSiteValidator.
+ */
+private fun validatePendingCallSites(
+    callSites: List<PendingCallSiteValidation>,
+    assembledGraphTypes: Set<String>,
+    dslDefinitions: List<Definition>,
+    annotationProcessor: KoinAnnotationProcessor?
+) {
+    // Build the set of all known provided types
+    val allKnownTypes = buildSet {
+        addAll(assembledGraphTypes)
+        // Add DSL definition types + bindings
+        for (def in dslDefinitions) {
+            def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
+            for (b in def.bindings) { b.fqNameWhenAvailable?.asString()?.let { add(it) } }
+        }
+        // When no startKoin/koinConfiguration in this compilation unit,
+        // fall back to annotation definitions as known types
+        if (assembledGraphTypes.isEmpty() && annotationProcessor != null) {
+            for (def in annotationProcessor.getAllKnownDefinitions()) {
+                def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
+                for (b in def.bindings) { b.fqNameWhenAvailable?.asString()?.let { add(it) } }
+            }
+        }
+    }
+
+    // Also check for definition annotations on the target class (heuristic when no graph)
+    val definitionAnnotationFqNames: Set<String> by lazy {
+        (org.koin.compiler.plugin.KoinAnnotationFqNames.KOIN_DEFINITION_ANNOTATIONS.map { it.asString() } +
+            org.koin.compiler.plugin.KoinAnnotationFqNames.JAKARTA_SINGLETON.asString() +
+            org.koin.compiler.plugin.KoinAnnotationFqNames.JAVAX_SINGLETON.asString()).toSet()
+    }
+
+    for (callSite in callSites) {
+        // Skip @Provided types
+        if (ProvidedTypeRegistry.isProvided(callSite.targetFqName)) {
+            KoinPluginLogger.debug { "A4: Skip ${callSite.targetFqName} (@Provided)" }
+            continue
+        }
+
+        // Skip whitelisted framework types
+        if (BindingRegistry.isWhitelistedType(callSite.targetFqName)) {
+            KoinPluginLogger.debug { "A4: Skip ${callSite.targetFqName} (framework whitelist)" }
+            continue
+        }
+
+        // Check assembled graph + DSL definitions
+        if (callSite.targetFqName in allKnownTypes) {
+            KoinPluginLogger.debug { "A4: OK ${callSite.callFunctionName}<${callSite.targetFqName}>() — found in graph" }
+            continue
+        }
+
+        // Heuristic: check if the class has a definition annotation (for cross-module scenarios)
+        if (assembledGraphTypes.isEmpty()) {
+            val hasAnnotation = callSite.targetClass.annotations.any { annotation ->
+                @Suppress("DEPRECATION")
+                annotation.type.classFqName?.asString() in definitionAnnotationFqNames
+            }
+            if (hasAnnotation) {
+                KoinPluginLogger.debug { "A4: OK ${callSite.callFunctionName}<${callSite.targetFqName}>() — has definition annotation" }
+                continue
+            }
+        }
+
+        // Not found — report error
+        KoinPluginLogger.error(
+            "Missing definition: ${callSite.targetFqName}\n" +
+            "  resolved by: ${callSite.callFunctionName}<${callSite.targetClass.name}>()\n" +
+            "  No matching definition found in any declared module.\n" +
+            "  Check your declaration with Annotation or DSL.",
+            callSite.filePath, callSite.line, callSite.column
+        )
     }
 }

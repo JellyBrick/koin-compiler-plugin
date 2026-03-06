@@ -533,25 +533,7 @@ class KoinAnnotationProcessor(
     /**
      * Detect interfaces/superclasses that should be auto-bound
      */
-    private fun detectBindings(declaration: IrClass): List<IrClass> {
-        val bindings = mutableListOf<IrClass>()
-
-        // Get all supertypes except Any
-        declaration.superTypes.forEach { superType ->
-            val superClass = superType.classifierOrNull?.owner as? IrClass ?: return@forEach
-            val superFqName = superClass.fqNameWhenAvailable?.asString() ?: return@forEach
-
-            // Skip kotlin.Any and other common types
-            if (superFqName == "kotlin.Any") return@forEach
-
-            // Include interfaces and abstract classes
-            if (superClass.isInterface || superClass.modality == Modality.ABSTRACT) {
-                bindings.add(superClass)
-            }
-        }
-
-        return bindings
-    }
+    private fun detectBindings(declaration: IrClass): List<IrClass> = detectAutoBindings(declaration)
 
     private fun getComponentScanPackages(declaration: IrClass): List<String> {
         val annotation = declaration.annotations.firstOrNull { annotation ->
@@ -656,6 +638,7 @@ class KoinAnnotationProcessor(
                         is Definition.ClassDef -> def.irClass.name.asString()
                         is Definition.FunctionDef -> "${def.irFunction.name}() -> ${def.returnTypeClass.name}"
                         is Definition.TopLevelFunctionDef -> "${def.irFunction.name}() -> ${def.returnTypeClass.name}"
+                        is Definition.DslDef -> "(dsl) ${def.irClass.name}"
                         is Definition.ExternalFunctionDef -> "(external) -> ${def.returnTypeClass.name}"
                     }
                     val defType = def.definitionType.name.lowercase()
@@ -857,6 +840,7 @@ class KoinAnnotationProcessor(
                         generateSingleHint(moduleFragment, hintsPackage, hintName, targetClass, targetClassId, fallback)
                         KoinPluginLogger.debug { "    + componentscanfunc hint: ${targetClass.name} ($defTypeStr)" }
                     }
+                    is Definition.DslDef -> continue // DSL definitions don't generate hints
                     is Definition.FunctionDef -> {
                         // Skip: module-internal function definitions (@Singleton fun provide...() inside @Module classes)
                         // are NOT component-scanned. They are resolved directly from the module class, not via hints.
@@ -1860,6 +1844,7 @@ class KoinAnnotationProcessor(
                 is Definition.ClassDef -> definitionCallBuilder.buildClassDefinitionCall(definition, moduleReceiverParam, lambdaFunction, lambdaBuilder)
                 is Definition.FunctionDef -> definitionCallBuilder.buildFunctionDefinitionCall(definition, moduleClass, moduleReceiverParam, lambdaFunction, lambdaBuilder, parentFunction)
                 is Definition.TopLevelFunctionDef -> definitionCallBuilder.buildTopLevelFunctionDefinitionCall(definition, moduleReceiverParam, lambdaFunction, lambdaBuilder)
+                is Definition.DslDef -> continue // DSL definitions are handled separately in Phase 2
                 is Definition.ExternalFunctionDef -> continue // Provider-only, no code to generate
             }
             if (definitionCall != null) {
@@ -1983,6 +1968,7 @@ class KoinAnnotationProcessor(
                 is Definition.ClassDef -> definitionCallBuilder.buildScopedClassDefinitionCall(definition, scopeDslReceiver, scopeLambdaFunction, scopeLambdaBuilder)
                 is Definition.FunctionDef -> definitionCallBuilder.buildScopedFunctionDefinitionCall(definition, moduleClass, scopeDslReceiver, scopeLambdaFunction, scopeLambdaBuilder, parentFunction)
                 is Definition.TopLevelFunctionDef -> definitionCallBuilder.buildScopedTopLevelFunctionDefinitionCall(definition, scopeDslReceiver, scopeLambdaFunction, scopeLambdaBuilder)
+                is Definition.DslDef -> continue // DSL definitions are handled separately in Phase 2
                 is Definition.ExternalFunctionDef -> continue // Provider-only, no code to generate
             }
             if (definitionCall != null) {
@@ -2049,4 +2035,25 @@ class KoinAnnotationProcessor(
         }?.owner
     }
 
+}
+
+/**
+ * Detect interfaces/superclasses that should be auto-bound for a given class.
+ * Shared utility used by both KoinAnnotationProcessor and KoinDSLTransformer.
+ */
+internal fun detectAutoBindings(declaration: IrClass): List<IrClass> {
+    val bindings = mutableListOf<IrClass>()
+
+    declaration.superTypes.forEach { superType ->
+        val superClass = superType.classifierOrNull?.owner as? IrClass ?: return@forEach
+        val superFqName = superClass.fqNameWhenAvailable?.asString() ?: return@forEach
+
+        if (superFqName == "kotlin.Any") return@forEach
+
+        if (superClass.isInterface || superClass.modality == Modality.ABSTRACT) {
+            bindings.add(superClass)
+        }
+    }
+
+    return bindings
 }

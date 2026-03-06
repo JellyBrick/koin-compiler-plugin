@@ -66,7 +66,8 @@ class KoinStartTransformer(
     private val annotationProcessor: KoinAnnotationProcessor? = null,
     private val safetyValidator: CompileSafetyValidator? = null,
     private val lookupTracker: LookupTracker? = null,
-    private val expectActualTracker: ExpectActualTracker? = null
+    private val expectActualTracker: ExpectActualTracker? = null,
+    private val dslDefinitions: List<Definition> = emptyList()
 ) : IrElementTransformerVoid() {
 
     private var currentFile: IrFile? = null
@@ -135,7 +136,8 @@ class KoinStartTransformer(
                 moduleClasses,
                 annotationProcessor.collectedModuleClasses,
                 annotationProcessor::getDefinitionsForModule,
-                annotationProcessor::getDefinitionsForDependencyModule
+                annotationProcessor::getDefinitionsForDependencyModule,
+                dslDefinitions
             )
         }
 

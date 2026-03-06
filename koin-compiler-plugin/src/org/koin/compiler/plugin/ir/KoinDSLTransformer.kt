@@ -16,6 +16,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.DeprecatedForRemovalCompilerApi
+import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.koin.compiler.plugin.KoinAnnotationFqNames
 import org.koin.compiler.plugin.KoinPluginLogger
@@ -37,7 +38,16 @@ class KoinDSLTransformer(
 ) : IrElementTransformerVoid() {
 
     private val dslSafetyChecksEnabled = KoinPluginLogger.dslSafetyChecksEnabled
+    private val safetyChecksEnabled = KoinPluginLogger.safetyChecksEnabled
     private var currentFile: IrFile? = null
+
+    // ── Collected DSL definitions (for A3 full-graph validation) ──
+    private val _dslDefinitions = mutableListOf<Definition.DslDef>()
+    val dslDefinitions: List<Definition.DslDef> get() = _dslDefinitions
+
+    // ── Collected call-site validations (replaces KoinCallSiteValidator tree walk) ──
+    private val _pendingCallSites = mutableListOf<PendingCallSiteValidation>()
+    val collectedCallSites: List<PendingCallSiteValidation> get() = _pendingCallSites
 
     override fun visitFile(declaration: IrFile): IrFile {
         currentFile = declaration
@@ -80,11 +90,13 @@ class KoinDSLTransformer(
      * @property function The enclosing function being visited
      * @property lambda The enclosing lambda (for create() validation)
      * @property definitionCall The enclosing DSL definition call (single/factory/scoped/etc.)
+     * @property scopeTypeClass The scope type when inside a scope<ScopeType> { } block
      */
     private data class TransformContext(
         val function: IrFunction? = null,
         val lambda: IrSimpleFunction? = null,
-        val definitionCall: Name? = null
+        val definitionCall: Name? = null,
+        val scopeTypeClass: IrClass? = null
     )
 
     // Stack-based context management (thread-safe for single-threaded compiler)
@@ -114,13 +126,45 @@ class KoinDSLTransformer(
     // DSL definition function names to track
     private val definitionNames = setOf(singleName, factoryName, scopedName, viewModelName, workerName)
 
+    // Mapping from function names to DefinitionType
+    private val definitionTypeMap = mapOf(
+        singleName to DefinitionType.SINGLE,
+        factoryName to DefinitionType.FACTORY,
+        scopedName to DefinitionType.SCOPED,
+        viewModelName to DefinitionType.VIEW_MODEL,
+        workerName to DefinitionType.WORKER
+    )
+
+    // FQ name strings of call-site resolution functions to intercept
+    private val callSiteResolutionFqNames: Set<String> =
+        KoinAnnotationFqNames.CALL_SITE_RESOLUTION_FUNCTIONS.map { it.asString() }.toSet()
+
+    // Scope function name for detecting scope<ScopeType> { } blocks
+    private val scopeName = Name.identifier("scope")
+
     override fun visitCall(expression: IrCall): IrExpression {
-        val functionName = expression.symbol.owner.name
+        val callee = expression.symbol.owner
+        val functionName = callee.name
+
+        // Collect call-site validations (koinViewModel<T>(), get<T>(), inject<T>(), etc.)
+        if (safetyChecksEnabled) {
+            collectCallSiteIfResolutionFunction(expression, callee)
+        }
 
         // Track if we're entering a Koin DSL definition call (single, factory, scoped, etc.)
         val previousContext = transformContext
+
         if (functionName in definitionNames) {
             transformContext = transformContext.copy(definitionCall = functionName)
+        }
+
+        // Detect scope<ScopeType> { } — push scope type into context
+        if (functionName == scopeName && expression.typeArgumentsCount >= 1) {
+            val scopeTypeArg = expression.getTypeArgument(0)
+            val scopeTypeClass = (scopeTypeArg?.classifierOrNull as? IrClassSymbol)?.owner
+            if (scopeTypeClass != null) {
+                transformContext = transformContext.copy(scopeTypeClass = scopeTypeClass)
+            }
         }
 
         val transformedCall = super.visitCall(expression) as IrCall
@@ -165,6 +209,41 @@ class KoinDSLTransformer(
     }
 
     /**
+     * If the call is a Koin resolution function (koinViewModel<T>(), get<T>(), inject<T>(), etc.),
+     * collect it as a pending call-site validation.
+     */
+    private fun collectCallSiteIfResolutionFunction(expression: IrCall, callee: IrSimpleFunction) {
+        val calleeFqName = callee.fqNameWhenAvailable?.asString() ?: return
+        if (calleeFqName !in callSiteResolutionFqNames) return
+        if (callee.typeParameters.isEmpty()) return
+
+        val typeArg = expression.getTypeArgument(0) ?: return
+        val targetClass = (typeArg.classifierOrNull as? IrClassSymbol)?.owner ?: return
+        val targetFqName = targetClass.fqNameWhenAvailable?.asString() ?: return
+
+        val file = currentFile
+        val filePath = file?.fileEntry?.name
+        val line = if (file != null && expression.startOffset >= 0) {
+            file.fileEntry.getLineNumber(expression.startOffset) + 1
+        } else 0
+        val column = if (file != null && expression.startOffset >= 0) {
+            file.fileEntry.getColumnNumber(expression.startOffset) + 1
+        } else 0
+
+        _pendingCallSites.add(PendingCallSiteValidation(
+            targetFqName = targetFqName,
+            targetClass = targetClass,
+            callFunctionName = calleeFqName.substringAfterLast("."),
+            filePath = filePath,
+            line = line,
+            column = column
+        ))
+
+        // IC: call site file depends on the target class
+        trackClassLookup(lookupTracker, currentFile, targetClass)
+    }
+
+    /**
      * Handle single<T>(), factory<T>(), scoped<T>(), viewModel<T>(), worker<T>()
      */
     private fun handleTypeParameterCall(
@@ -183,6 +262,17 @@ class KoinDSLTransformer(
 
         // IC: file containing DSL call depends on the target class
         trackClassLookup(lookupTracker, currentFile, targetClass)
+
+        // Collect DSL definition for safety validation
+        val defType = definitionTypeMap[functionName]
+        if (defType != null && safetyChecksEnabled) {
+            _dslDefinitions.add(Definition.DslDef(
+                irClass = targetClass,
+                definitionType = defType,
+                bindings = detectAutoBindings(targetClass),
+                scopeClass = if (defType == DefinitionType.SCOPED) transformContext.scopeTypeClass else null
+            ))
+        }
 
         val receiverClassName = receiverClassifier.name.asString()
 
@@ -264,6 +354,16 @@ class KoinDSLTransformer(
                 val targetClass = referencedFunction.parent as IrClass
                 // IC: file containing create(::T) depends on the target class
                 trackClassLookup(lookupTracker, currentFile, targetClass)
+                // Collect DSL definition from create(::T) based on enclosing definition call
+                val enclosingDefType = currentDefinitionCall?.let { definitionTypeMap[it] }
+                if (enclosingDefType != null && safetyChecksEnabled) {
+                    _dslDefinitions.add(Definition.DslDef(
+                        irClass = targetClass,
+                        definitionType = enclosingDefType,
+                        bindings = detectAutoBindings(targetClass),
+                        scopeClass = if (enclosingDefType == DefinitionType.SCOPED) transformContext.scopeTypeClass else null
+                    ))
+                }
                 val enclosingDef = currentDefinitionCall?.asString() ?: "unknown"
                 KoinPluginLogger.user { "Intercepting $enclosingDef { create(::${targetClass.name}) } -> ${targetClass.name}" }
                 builder.irCallConstructor(referencedFunction.symbol, emptyList()).apply {
@@ -367,3 +467,16 @@ class KoinDSLTransformer(
     }
 
 }
+
+/**
+ * A pending call-site validation collected during Phase 2.
+ * Validated after Phase 3 when the assembled graph is available.
+ */
+data class PendingCallSiteValidation(
+    val targetFqName: String,
+    val targetClass: IrClass,
+    val callFunctionName: String,
+    val filePath: String?,
+    val line: Int,
+    val column: Int
+)

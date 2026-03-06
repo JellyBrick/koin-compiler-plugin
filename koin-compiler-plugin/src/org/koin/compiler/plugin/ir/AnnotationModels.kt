@@ -106,6 +106,21 @@ sealed class Definition {
     ) : Definition()
 
     /**
+     * DSL-based definition (single<T>(), factory<T>(), viewModel<T>(), etc.)
+     * Collected during Phase 2 (KoinDSLTransformer) for inclusion in the safety graph.
+     */
+    data class DslDef(
+        val irClass: IrClass,
+        override val definitionType: DefinitionType,
+        override val bindings: List<IrClass>,
+        override val scopeClass: IrClass? = null,
+        override val scopeArchetype: ScopeArchetype? = null,
+        override val createdAtStart: Boolean = false
+    ) : Definition() {
+        override val returnTypeClass: IrClass get() = irClass
+    }
+
+    /**
      * Provider-only definition discovered from cross-module function hints.
      * Represents a tagged top-level function (@Singleton fun provide...()) from another Gradle module.
      * Only contributes to the provided types set — its own requirements were validated in its source module.
