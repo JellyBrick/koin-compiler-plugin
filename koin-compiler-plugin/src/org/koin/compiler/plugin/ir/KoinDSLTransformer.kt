@@ -16,6 +16,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.DeprecatedForRemovalCompilerApi
+import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.koin.compiler.plugin.KoinAnnotationFqNames
 import org.koin.compiler.plugin.KoinPluginLogger
 
@@ -31,10 +32,17 @@ import org.koin.compiler.plugin.KoinPluginLogger
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 @Suppress("DEPRECATION", "DEPRECATION_ERROR")
 class KoinDSLTransformer(
-    private val context: IrPluginContext
+    private val context: IrPluginContext,
+    private val lookupTracker: LookupTracker? = null
 ) : IrElementTransformerVoid() {
 
     private val dslSafetyChecksEnabled = KoinPluginLogger.dslSafetyChecksEnabled
+    private var currentFile: IrFile? = null
+
+    override fun visitFile(declaration: IrFile): IrFile {
+        currentFile = declaration
+        return super.visitFile(declaration)
+    }
 
     // Qualifier extraction helper
     private val qualifierExtractor = QualifierExtractor(context)
@@ -172,6 +180,10 @@ class KoinDSLTransformer(
             KoinPluginLogger.debug { "$functionName<${targetClass.name}>() skipped - no primary constructor" }
             return call
         }
+
+        // IC: file containing DSL call depends on the target class
+        trackClassLookup(lookupTracker, currentFile, targetClass)
+
         val receiverClassName = receiverClassifier.name.asString()
 
         // Log the interception
@@ -250,6 +262,8 @@ class KoinDSLTransformer(
         return when (referencedFunction) {
             is IrConstructor -> {
                 val targetClass = referencedFunction.parent as IrClass
+                // IC: file containing create(::T) depends on the target class
+                trackClassLookup(lookupTracker, currentFile, targetClass)
                 val enclosingDef = currentDefinitionCall?.asString() ?: "unknown"
                 KoinPluginLogger.user { "Intercepting $enclosingDef { create(::${targetClass.name}) } -> ${targetClass.name}" }
                 builder.irCallConstructor(referencedFunction.symbol, emptyList()).apply {

@@ -2,10 +2,15 @@ package org.koin.compiler.plugin.ir
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.incremental.components.ExpectActualTracker
+import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.koin.compiler.plugin.KoinPluginLogger
 
-class KoinIrExtension : IrGenerationExtension {
+class KoinIrExtension(
+    private val lookupTracker: LookupTracker?,
+    private val expectActualTracker: ExpectActualTracker
+) : IrGenerationExtension {
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
         KoinPluginLogger.debug { "IR Phase starting for module: ${moduleFragment.name}" }
 
@@ -28,20 +33,20 @@ class KoinIrExtension : IrGenerationExtension {
         // Phase 1: Process @Module/@ComponentScan/@Singleton/@Factory annotations
         // Generates: fun MyModule.module() = module { single<A>(); factory<B>() }
         KoinPluginLogger.debug { "Phase 1: Processing annotations" }
-        val annotationProcessor = KoinAnnotationProcessor(pluginContext, qualifierExtractor, safetyValidator)
+        val annotationProcessor = KoinAnnotationProcessor(pluginContext, qualifierExtractor, safetyValidator, lookupTracker, expectActualTracker)
         annotationProcessor.collectAnnotations(moduleFragment)
         annotationProcessor.generateModuleExtensions(moduleFragment)
 
         // Phase 2: Transform single<T>() -> single(T::class, null) { T(get()) }
         KoinPluginLogger.debug { "Phase 2: Transforming DSL calls" }
-        val koinTransformer = KoinDSLTransformer(pluginContext)
+        val koinTransformer = KoinDSLTransformer(pluginContext, lookupTracker)
         moduleFragment.transform(koinTransformer, null)
 
         // Phase 3: Transform startKoin<T> { } to inject modules()
         // Transforms: startKoin<MyApp> { printLogger() }
         // Into: startKoin { printLogger(); modules(listOf(Module1().module, ...)) }
         KoinPluginLogger.debug { "Phase 3: Transforming startKoin calls" }
-        val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor, safetyValidator)
+        val startKoinTransformer = KoinStartTransformer(pluginContext, moduleFragment, annotationProcessor, safetyValidator, lookupTracker, expectActualTracker)
         moduleFragment.transform(startKoinTransformer, null)
 
         // Phase 3.5: Validate koinViewModel<T>() / koinNavViewModel<T>() call sites
@@ -49,7 +54,7 @@ class KoinIrExtension : IrGenerationExtension {
         // Otherwise falls back to annotation/definition heuristics.
         if (safetyValidator != null) {
             KoinPluginLogger.debug { "Phase 3.5: Validating call-site resolutions (graph types: ${safetyValidator.assembledGraphTypes.size})" }
-            val callSiteValidator = KoinCallSiteValidator(annotationProcessor, safetyValidator.assembledGraphTypes)
+            val callSiteValidator = KoinCallSiteValidator(annotationProcessor, safetyValidator.assembledGraphTypes, lookupTracker)
             moduleFragment.transform(callSiteValidator, null)
         }
 

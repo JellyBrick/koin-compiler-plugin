@@ -6,9 +6,11 @@ import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
 import org.jetbrains.kotlin.config.CommonConfigurationKeys
-import org.koin.compiler.plugin.ir.KoinIrExtension
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrarAdapter
+import org.jetbrains.kotlin.incremental.components.ExpectActualTracker
+import org.jetbrains.kotlin.incremental.components.LookupTracker
+import org.koin.compiler.plugin.ir.KoinIrExtension
 
 /**
  * Centralized logger for the Koin compiler plugin.
@@ -161,9 +163,17 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
         // Initialize the centralized logger
         KoinPluginLogger.init(messageCollector, userLogs, debugLogs, dslSafetyChecks, skipDefaultValues, safetyChecks)
 
+        // IC trackers for incremental compilation support
+        val lookupTracker = configuration.get(CommonConfigurationKeys.LOOKUP_TRACKER)
+        val expectActualTracker = configuration.get(
+            CommonConfigurationKeys.EXPECT_ACTUAL_TRACKER,
+            ExpectActualTracker.DoNothing
+        )
+        KoinPluginLogger.debug { "IC trackers: lookupTracker=${lookupTracker?.javaClass?.simpleName ?: "NULL"}, expectActualTracker=${expectActualTracker.javaClass.simpleName}" }
+
         // FIR extension for generating visible declarations (module extension property)
         FirExtensionRegistrarAdapter.registerExtension(KoinPluginRegistrar())
         // IR extension for transforming function bodies
-        IrGenerationExtension.registerExtension(KoinIrExtension())
+        IrGenerationExtension.registerExtension(KoinIrExtension(lookupTracker, expectActualTracker))
     }
 }

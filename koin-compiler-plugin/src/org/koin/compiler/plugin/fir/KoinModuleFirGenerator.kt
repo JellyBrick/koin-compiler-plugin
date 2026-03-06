@@ -188,6 +188,9 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         private const val COMPONENT_SCAN_HINT_PREFIX = KoinPluginConstants.COMPONENT_SCAN_HINT_PREFIX
         private const val COMPONENT_SCAN_FUNCTION_HINT_PREFIX = KoinPluginConstants.COMPONENT_SCAN_FUNCTION_HINT_PREFIX
 
+        // Per-function definition hints for @Module function definitions
+        private const val MODULE_DEFINITION_HINT_PREFIX = KoinPluginConstants.MODULE_DEFINITION_HINT_PREFIX
+
         /**
          * Sanitize a module ClassId into a collision-free identifier for hint function names.
          * Uses the FQName with dots replaced by underscores, preserving segment boundaries.
@@ -254,6 +257,32 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
             val defType = remainder.substring(lastUnderscore + 1)
             if (defType !in ALL_DEFINITION_TYPES) return null
             return moduleId to defType
+        }
+
+        /**
+         * Build hint function name for a per-function definition inside a @Module class.
+         * Example: ("com_example_DaosModule", "providesTopicDao") -> "moduledef_com_example_DaosModule_providesTopicDao"
+         */
+        fun moduleDefinitionHintFunctionName(moduleId: String, functionName: String): Name =
+            Name.identifier("$MODULE_DEFINITION_HINT_PREFIX${moduleId}_$functionName")
+
+        /**
+         * Parse a module definition hint function name back to (moduleId, functionName).
+         * Example: "moduledef_com_example_DaosModule_providesTopicDao" -> ("com_example_DaosModule", "providesTopicDao")
+         * Returns null if the function name doesn't match the pattern.
+         */
+        fun moduleDefinitionInfoFromHintName(functionName: String): Pair<String, String>? {
+            if (!functionName.startsWith(MODULE_DEFINITION_HINT_PREFIX)) return null
+            val remainder = functionName.removePrefix(MODULE_DEFINITION_HINT_PREFIX)
+            // The function name is the last segment after the last underscore that follows the moduleId.
+            // Module IDs use underscores for package separators, so we need a different approach:
+            // We match against known module IDs from moduleDefinitionFunctionInfos.
+            // For parsing purposes, we just return the raw remainder — callers use direct map lookup.
+            val lastUnderscore = remainder.lastIndexOf('_')
+            if (lastUnderscore <= 0) return null
+            val moduleId = remainder.substring(0, lastUnderscore)
+            val funcName = remainder.substring(lastUnderscore + 1)
+            return moduleId to funcName
         }
 
         // Definition types for hint functions - use shared constants
@@ -324,6 +353,19 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
     private data class DefinitionFunctionInfo(
         val functionSymbol: FirNamedFunctionSymbol,
         val definitionType: String, // single, factory, scoped, viewmodel, worker
+        val containingFileName: String?,
+        val returnTypeClassId: ClassId
+    )
+
+    /**
+     * Holds a function definition inside a @Module class with its return type.
+     * Used for per-function ABI tracking — each generates its own hint function.
+     */
+    private data class ModuleDefinitionFunctionInfo(
+        val functionSymbol: FirNamedFunctionSymbol,
+        val moduleClassId: ClassId,
+        val functionName: String,
+        val definitionType: String,
         val containingFileName: String?,
         val returnTypeClassId: ClassId
     )
@@ -749,6 +791,66 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         functions
     }
 
+    // Cache of function definitions inside @Module classes for per-function ABI tracking.
+    // Each function generates its own hint so adding/removing a function changes the ABI,
+    // triggering downstream module recompilation.
+    private val moduleDefinitionFunctionInfos: List<ModuleDefinitionFunctionInfo> by lazy {
+        val provider = session.predicateBasedProvider
+        val results = mutableListOf<ModuleDefinitionFunctionInfo>()
+
+        // Build set of known @Module class IDs for filtering
+        val moduleClassIds = moduleClassInfos.map { it.classSymbol.classId }.toSet()
+        if (moduleClassIds.isEmpty()) {
+            log { "No @Module classes found, skipping module definition function collection" }
+            return@lazy results
+        }
+
+        fun collectModuleFunctions(predicate: LookupPredicate, defType: String) {
+            provider.getSymbolsByPredicate(predicate)
+                .filterIsInstance<FirNamedFunctionSymbol>()
+                .forEach { functionSymbol ->
+                    // Only keep functions inside @Module classes
+                    val callableId = functionSymbol.callableId
+                    val containingClassId = callableId.classId ?: return@forEach
+                    if (containingClassId !in moduleClassIds) return@forEach
+
+                    // Get return type ClassId — may not be resolved yet for implicit return types
+                    val returnTypeClassId = try {
+                        functionSymbol.resolvedReturnTypeRef.coneType.classId
+                    } catch (_: Exception) {
+                        null
+                    } ?: return@forEach
+
+                    // Skip Unit return types
+                    if (returnTypeClassId.asSingleFqName().asString() == "kotlin.Unit") return@forEach
+
+                    val funcName = callableId.callableName.asString()
+
+                    // Get containing file name from the module class info
+                    val moduleInfo = moduleClassInfos.first { it.classSymbol.classId == containingClassId }
+                    val containingFileName = moduleInfo.containingFileName
+
+                    if (containingFileName != null) {
+                        log { "  Found @$defType module function: ${containingClassId.shortClassName}.$funcName() -> $returnTypeClassId" }
+                        results.add(ModuleDefinitionFunctionInfo(
+                            functionSymbol, containingClassId, funcName, defType, containingFileName, returnTypeClassId
+                        ))
+                    }
+                }
+        }
+
+        log { "Collecting @Module function definitions for per-function ABI tracking..." }
+        collectModuleFunctions(singletonPredicate, DEF_TYPE_SINGLE)
+        collectModuleFunctions(singlePredicate, DEF_TYPE_SINGLE)
+        collectModuleFunctions(factoryPredicate, DEF_TYPE_FACTORY)
+        collectModuleFunctions(scopedPredicate, DEF_TYPE_SCOPED)
+        collectModuleFunctions(viewModelPredicate, DEF_TYPE_VIEWMODEL)
+        collectModuleFunctions(workerPredicate, DEF_TYPE_WORKER)
+
+        log { "Found ${results.size} @Module function definitions (per-function hints for IC)" }
+        results
+    }
+
     /**
      * Check if a FIR class symbol has a constructor annotated with @Inject (jakarta or javax).
      * Works for both KtPsiSourceElement and KtLightSourceElement sources.
@@ -1009,7 +1111,14 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         // using registerFunctionAsMetadataVisible (see KoinAnnotationProcessor.generateModuleScanHints).
         // This ensures complete discovery of @Inject constructor classes in subpackages.
 
-        log { "getTopLevelCallableIds() returning ${callableIds.size} callables (${moduleClasses.size} modules, definitions=${definitionClassInfos.size}, functionDefs=${definitionFunctionInfos.size})" }
+        // Generate per-function definition hints for @Module function definitions
+        // Each function gets its own hint so adding/removing a function changes the ABI
+        for (funcInfo in moduleDefinitionFunctionInfos) {
+            val moduleId = sanitizeModuleIdForHint(funcInfo.moduleClassId)
+            callableIds.add(CallableId(HINTS_PACKAGE, moduleDefinitionHintFunctionName(moduleId, funcInfo.functionName)))
+        }
+
+        log { "getTopLevelCallableIds() returning ${callableIds.size} callables (${moduleClasses.size} modules, definitions=${definitionClassInfos.size}, functionDefs=${definitionFunctionInfos.size}, moduleDefFuncs=${moduleDefinitionFunctionInfos.size})" }
         return callableIds
     }
 
@@ -1167,6 +1276,32 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                 }
             }
 
+            // Generate per-function definition hints for @Module function definitions
+            val moduleDefInfo = moduleDefinitionInfoFromHintName(callableId.callableName.asString())
+            if (moduleDefInfo != null) {
+                val (moduleId, funcName) = moduleDefInfo
+                val matchingFunc = moduleDefinitionFunctionInfos.firstOrNull { info ->
+                    sanitizeModuleIdForHint(info.moduleClassId) == moduleId && info.functionName == funcName
+                }
+                if (matchingFunc != null) {
+                    val containingFile = matchingFunc.containingFileName ?: return emptyList()
+                    val returnClassType = matchingFunc.returnTypeClassId.constructClassLikeType(emptyArray(), false)
+
+                    log { "  -> Generating module definition hint for ${matchingFunc.moduleClassId.shortClassName}.$funcName() -> ${matchingFunc.returnTypeClassId} in file $containingFile" }
+
+                    return listOf(
+                        createTopLevelFunction(
+                            Key,
+                            callableId,
+                            session.builtinTypes.unitType.coneType,
+                            containingFileName = containingFile
+                        ) {
+                            valueParameter(Name.identifier("contributed"), returnClassType)
+                        }.apply { markAsDeprecatedHidden() }.symbol
+                    )
+                }
+            }
+
             // Note: componentscan_* / componentscanfunc_* hints are now generated at IR time
             // using registerFunctionAsMetadataVisible (see KoinAnnotationProcessor.generateModuleScanHints).
         }
@@ -1178,7 +1313,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
      * Claim ownership of the hints package for generated hint functions.
      */
     override fun hasPackage(packageFqName: FqName): Boolean {
-        if (packageFqName == HINTS_PACKAGE && (configurationModules.isNotEmpty() || definitionClassInfos.isNotEmpty() || definitionFunctionInfos.isNotEmpty())) {
+        if (packageFqName == HINTS_PACKAGE && (configurationModules.isNotEmpty() || definitionClassInfos.isNotEmpty() || definitionFunctionInfos.isNotEmpty() || moduleDefinitionFunctionInfos.isNotEmpty())) {
             return true
         }
         return super.hasPackage(packageFqName)

@@ -9,6 +9,7 @@ import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.types.classifierOrNull
 import org.jetbrains.kotlin.ir.types.classFqName
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
+import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
 import org.koin.compiler.plugin.KoinAnnotationFqNames
 import org.koin.compiler.plugin.KoinPluginLogger
@@ -35,7 +36,8 @@ import org.koin.compiler.plugin.ProvidedTypeRegistry
 @Suppress("DEPRECATION", "DEPRECATION_ERROR")
 class KoinCallSiteValidator(
     private val annotationProcessor: KoinAnnotationProcessor,
-    private val assembledGraphTypes: Set<String>
+    private val assembledGraphTypes: Set<String>,
+    private val lookupTracker: LookupTracker? = null
 ) : IrElementTransformerVoid() {
 
     /** FQ name strings of functions to intercept. */
@@ -79,6 +81,9 @@ class KoinCallSiteValidator(
             ?: return super.visitCall(expression)
         val targetFqName = targetClass.fqNameWhenAvailable?.asString()
             ?: return super.visitCall(expression)
+
+        // IC: call site file depends on the target class (annotation changes trigger recompilation)
+        trackClassLookup(lookupTracker, currentFile, targetClass)
 
         // Skip @Provided types
         if (ProvidedTypeRegistry.isProvided(targetFqName)) {

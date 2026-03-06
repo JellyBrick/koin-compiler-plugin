@@ -56,3 +56,8 @@ FILE: test.kt
     }
 FILE: /functionModuleModule.kt
     public final fun R|FunctionModule|.module(): R|org/koin/core/module/Module|
+FILE: org/koin/plugin/hints/functionModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_functionModule_provideRepository(contributed: R|Repository|): R|kotlin/Unit|
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_functionModule_provideService(contributed: R|Service|): R|kotlin/Unit|

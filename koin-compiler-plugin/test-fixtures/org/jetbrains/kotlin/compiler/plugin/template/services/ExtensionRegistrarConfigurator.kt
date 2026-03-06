@@ -60,6 +60,6 @@ private class ExtensionRegistrarConfigurator(testServices: TestServices) : Envir
         // Initialize the logger for tests (enable both user and debug logs)
         KoinPluginLogger.init(messageCollector, userLogs = true, debugLogs = true, safetyChecks = true)
         FirExtensionRegistrarAdapter.registerExtension(KoinPluginRegistrar())
-        IrGenerationExtension.registerExtension(KoinIrExtension())
+        IrGenerationExtension.registerExtension(KoinIrExtension(lookupTracker = null, expectActualTracker = org.jetbrains.kotlin.incremental.components.ExpectActualTracker.DoNothing))
     }
 }

@@ -18,6 +18,8 @@ import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
 import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
+import org.jetbrains.kotlin.incremental.components.ExpectActualTracker
+import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
@@ -62,8 +64,17 @@ class KoinStartTransformer(
     private val context: IrPluginContext,
     private val moduleFragment: IrModuleFragment,
     private val annotationProcessor: KoinAnnotationProcessor? = null,
-    private val safetyValidator: CompileSafetyValidator? = null
+    private val safetyValidator: CompileSafetyValidator? = null,
+    private val lookupTracker: LookupTracker? = null,
+    private val expectActualTracker: ExpectActualTracker? = null
 ) : IrElementTransformerVoid() {
+
+    private var currentFile: IrFile? = null
+
+    override fun visitFile(declaration: IrFile): IrFile {
+        currentFile = declaration
+        return super.visitFile(declaration)
+    }
 
     // Koin types
     private val koinModuleClassId = ClassId.topLevel(FqName("org.koin.core.module.Module"))
@@ -109,6 +120,13 @@ class KoinStartTransformer(
 
         // Get modules from @KoinApplication(modules = [...]) annotation
         val moduleClasses = extractModulesFromKoinApplicationAnnotation(appClass)
+
+        // IC: startKoin file depends on each discovered module class
+        val startKoinFile = currentFile
+        for (moduleClass in moduleClasses) {
+            trackClassLookup(lookupTracker, startKoinFile, moduleClass)
+            linkDeclarationsForIC(expectActualTracker, startKoinFile, moduleClass)
+        }
 
         // A3: Validate the full assembled graph at the startKoin entry point
         if (safetyValidator != null && moduleClasses.isNotEmpty() && annotationProcessor != null) {

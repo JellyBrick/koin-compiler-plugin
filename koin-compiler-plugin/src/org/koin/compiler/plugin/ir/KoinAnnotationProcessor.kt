@@ -36,6 +36,8 @@ import org.koin.compiler.plugin.KoinAnnotationFqNames
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.ProvidedTypeRegistry
 import org.koin.compiler.plugin.PropertyValueRegistry
+import org.jetbrains.kotlin.incremental.components.ExpectActualTracker
+import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.koin.compiler.plugin.fir.KoinModuleFirGenerator
 import kotlin.io.path.Path
 import kotlin.io.path.absolutePathString
@@ -61,7 +63,9 @@ import kotlin.io.path.absolutePathString
 class KoinAnnotationProcessor(
     private val context: IrPluginContext,
     private val qualifierExtractor: QualifierExtractor,
-    private val safetyValidator: CompileSafetyValidator? = null
+    private val safetyValidator: CompileSafetyValidator? = null,
+    private val lookupTracker: LookupTracker? = null,
+    private val expectActualTracker: ExpectActualTracker? = null
 ) {
 
     // Argument generator for lambda parameters
@@ -1192,7 +1196,11 @@ class KoinAnnotationProcessor(
 
         // Class-based definitions from component scan
         val matchingClasses = findMatchingDefinitions(moduleClass)
+        val moduleFile = moduleClass.irClass.fileOrNull
         definitions.addAll(matchingClasses.map { defClass ->
+            // IC: module depends on each scanned definition class
+            trackClassLookup(lookupTracker, moduleFile, defClass.irClass)
+            linkDeclarationsForIC(expectActualTracker, moduleFile, defClass.irClass)
             Definition.ClassDef(
                 defClass.irClass,
                 defClass.definitionType,
@@ -1727,11 +1735,16 @@ class KoinAnnotationProcessor(
             // A2: @Configuration siblings — discover via hint functions
             val configLabels = extractConfigurationLabels(moduleClass.irClass)
             if (configLabels.isNotEmpty()) {
+                val modFile = moduleClass.irClass.fileOrNull
                 val siblingClasses = discoverConfigurationModulesFromHints(configLabels)
                 for (siblingClass in siblingClasses) {
                     val siblingFqName = siblingClass.fqNameWhenAvailable?.asString() ?: continue
                     // Skip self
                     if (siblingFqName == moduleClass.irClass.fqNameWhenAvailable?.asString()) continue
+
+                    // IC: module depends on each @Configuration sibling
+                    trackClassLookup(lookupTracker, modFile, siblingClass)
+                    linkDeclarationsForIC(expectActualTracker, modFile, siblingClass)
 
                     val sibling = modulesByFqName[siblingFqName]
                     if (sibling != null) {
