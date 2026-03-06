@@ -51,16 +51,22 @@ object KoinPluginLogger {
     var safetyChecksEnabled: Boolean = true
         private set
 
+    /** LookupTracker from compiler configuration, for direct IC lookup recording. */
+    @Volatile
+    var lookupTracker: LookupTracker? = null
+        private set
+
     /**
      * Initialize the logger with configuration from the compiler.
      */
-    fun init(collector: MessageCollector, userLogs: Boolean, debugLogs: Boolean, dslSafetyChecks: Boolean = true, skipDefaultValues: Boolean = true, safetyChecks: Boolean = true) {
+    fun init(collector: MessageCollector, userLogs: Boolean, debugLogs: Boolean, dslSafetyChecks: Boolean = true, skipDefaultValues: Boolean = true, safetyChecks: Boolean = true, lookupTracker: LookupTracker? = null) {
         messageCollector = collector
         userLogsEnabled = userLogs
         debugLogsEnabled = debugLogs
         dslSafetyChecksEnabled = dslSafetyChecks
         skipDefaultValuesEnabled = skipDefaultValues
         safetyChecksEnabled = safetyChecks
+        this.lookupTracker = lookupTracker
     }
 
     /**
@@ -160,11 +166,11 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
         val skipDefaultValues = configuration.get(KoinConfigurationKeys.SKIP_DEFAULT_VALUES, true)
         val safetyChecks = configuration.get(KoinConfigurationKeys.SAFETY_CHECKS, true)
 
-        // Initialize the centralized logger
-        KoinPluginLogger.init(messageCollector, userLogs, debugLogs, dslSafetyChecks, skipDefaultValues, safetyChecks)
-
         // IC trackers for incremental compilation support
         val lookupTracker = configuration.get(CommonConfigurationKeys.LOOKUP_TRACKER)
+
+        // Initialize the centralized logger (includes lookupTracker for FIR-level IC recording)
+        KoinPluginLogger.init(messageCollector, userLogs, debugLogs, dslSafetyChecks, skipDefaultValues, safetyChecks, lookupTracker)
         val expectActualTracker = configuration.get(
             CommonConfigurationKeys.EXPECT_ACTUAL_TRACKER,
             ExpectActualTracker.DoNothing

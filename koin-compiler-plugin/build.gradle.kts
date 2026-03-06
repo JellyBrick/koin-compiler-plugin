@@ -92,7 +92,8 @@ kotlin {
         freeCompilerArgs.addAll(
             "-Xsuppress-version-warnings",
             "-Xskip-prerelease-check",
-            "-Xallow-kotlin-package"
+            "-Xallow-kotlin-package",
+            "-Xcontext-parameters"
         )
         // Don't treat warnings as errors
         allWarningsAsErrors.set(false)
