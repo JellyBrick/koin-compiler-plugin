@@ -94,7 +94,7 @@ single<Service>()
 // With skipDefaultValues=false: Service(scope.get(), scope.get())
 ```
 
-### 2.3 Compile-Time Dependency Validation
+### 2.3 Compile-Time Dependency Validation ✅
 Detect missing dependencies at compile time instead of runtime crashes.
 - [x] Per-module validation (A1): local definitions + explicit includes
 - [x] Validate non-nullable parameters have definitions
@@ -112,12 +112,14 @@ Detect missing dependencies at compile time instead of runtime crashes.
   - [x] Qualifier propagation: `@Named`/`@Qualifier` via `qualifier_<name>` or `qualifierType` hint params
   - [x] Scope propagation: `@Scope(MyScope::class)` via `scope` hint parameter
   - [x] Bindings propagation: return type supertypes via `binding0`, `binding1`, ... hint params
-  - [ ] Package filtering uses return type's package, not function's package
 - [x] DSL validation (B): validate `single<T>()`, `factory<T>()` in hand-written modules
 - [x] Call-site validation (A4): validates `get<T>()`, `inject<T>()`, `koinViewModel<T>()` call sites with deferred cross-module hints
 - [x] Cross-module custom qualifier discovery via qualifier hint functions
-- [ ] Property validation (D): `@Property`/`@PropertyValue` matching
 - See [COMPILE_TIME_SAFETY.md](COMPILE_TIME_SAFETY.md) for detailed design and implementation
+
+**Post-GA:**
+- [x] Package filtering: scan now matches both function's package and return type's package
+- [ ] Property validation (D): `@Property`/`@PropertyValue` matching
 
 ### 2.4 `@Monitor` Annotation Support ✅
 Function interception for logging and performance capture:

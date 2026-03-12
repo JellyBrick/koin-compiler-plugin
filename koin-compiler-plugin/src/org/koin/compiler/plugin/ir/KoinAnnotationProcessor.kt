@@ -375,7 +375,10 @@ class KoinAnnotationProcessor(
         if (createdAtStart) {
             KoinPluginLogger.user { "  createdAtStart = true" }
         }
-        val qualifier = qualifierExtractor.extractFromDeclaration(declaration)
+        val qualifier = try { qualifierExtractor.extractFromDeclaration(declaration) } catch (e: Throwable) {
+            KoinPluginLogger.log { "  Could not extract qualifier from ${declaration.name}: ${e.message}" }
+            null
+        }
         when (qualifier) {
             is QualifierValue.StringQualifier -> KoinPluginLogger.user { "  @Named(\"${qualifier.name}\")" }
             is QualifierValue.TypeQualifier -> KoinPluginLogger.user { "  @Qualifier(${qualifier.irClass.name}::class)" }
@@ -1372,10 +1375,10 @@ class KoinAnnotationProcessor(
      * Used for cross-module @ComponentScan - discovers @Singleton fun provide...() etc. from other Gradle modules.
      * Creates ExternalFunctionDef instances (provider-only, no requirements to validate).
      *
-     * Note: Package filtering is based on the function's **return type** package, not the function's
-     * own package. This is because hints encode the return type (what the function provides).
-     * If the function returns a type from a different package than the function itself, the scan
-     * package must match the return type's package.
+     * Package filtering matches against BOTH the function's return type package AND the function's
+     * own package (encoded as a `funcpkg_*` hint parameter when it differs from the return type's package).
+     * This allows @ComponentScan("infra") to find @Singleton fun provideRepo(): domain.Repository
+     * when the function lives in package `infra` but returns a type from package `domain`.
      */
     private fun discoverFunctionDefinitionsFromHints(scanPackages: List<String>): List<Definition.ExternalFunctionDef> {
         val discovered = mutableListOf<Definition.ExternalFunctionDef>()
@@ -1395,9 +1398,15 @@ class KoinAnnotationProcessor(
                 val paramType = params.firstOrNull()?.type ?: continue
                 val returnTypeClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
 
-                // Check if the class's package matches scan packages
+                // Extract function's own package from funcpkg_<package> parameter (encoded when it differs from return type)
+                val funcPkgParam = params.firstOrNull { it.name.asString().startsWith("funcpkg_") }
+                val functionPackage = funcPkgParam?.name?.asString()?.removePrefix("funcpkg_")?.replace("_", ".")
+
+                // Check if either the return type's package or the function's own package matches scan packages
                 val defPackage = returnTypeClass.packageFqName?.asString() ?: continue
-                if (!matchesScanPackages(defPackage, scanPackages)) continue
+                val matchesReturnTypePackage = matchesScanPackages(defPackage, scanPackages)
+                val matchesFunctionPackage = functionPackage != null && matchesScanPackages(functionPackage, scanPackages)
+                if (!matchesReturnTypePackage && !matchesFunctionPackage) continue
 
                 // Skip if we already have this type in local top-level function definitions
                 if (definitionTopLevelFunctions.any { it.returnTypeClass.fqNameWhenAvailable == returnTypeClass.fqNameWhenAvailable }) {

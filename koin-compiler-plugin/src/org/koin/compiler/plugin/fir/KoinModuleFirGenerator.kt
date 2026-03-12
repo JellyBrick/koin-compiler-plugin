@@ -364,6 +364,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         val definitionType: String, // single, factory, scoped, viewmodel, worker
         val containingFileName: String?,
         val returnTypeClassId: ClassId,
+        val functionPackageName: String? = null,      // the function's own package (may differ from return type's package)
         val qualifierName: String? = null,           // from @Named("x") or @Qualifier(name="x")
         val qualifierTypeClassId: ClassId? = null,   // from @Qualifier(Type::class)
         val scopeClassId: ClassId? = null,            // from @Scope(MyScope::class)
@@ -1000,7 +1001,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                         logUser { "Exporting @$defType function ${callableId.callableName}() for cross-module discovery" }
                         functions.add(DefinitionFunctionInfo(
                             functionSymbol, defType, containingFileName, returnTypeClassId,
-                            qualifierName, qualifierTypeClassId, scopeClassId, bindingClassIds
+                            packageName, qualifierName, qualifierTypeClassId, scopeClassId, bindingClassIds
                         ))
                     }
                 }
@@ -1045,6 +1046,9 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                     val returnTypeClassId = try {
                         functionSymbol.resolvedReturnTypeRef.coneType.classId
                     } catch (e: IllegalStateException) {
+                        log { "  Could not resolve return type for ${callableId.callableName}: ${e.message}" }
+                        null
+                    } catch (e: IllegalArgumentException) {
                         log { "  Could not resolve return type for ${callableId.callableName}: ${e.message}" }
                         null
                     } catch (e: ClassCastException) {
@@ -1545,6 +1549,11 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
 
                     val metadataParams = buildMetadataParams(funcInfo.bindingClassIds, funcInfo.scopeClassId, funcInfo.qualifierName, funcInfo.qualifierTypeClassId)
 
+                    // Encode function's own package when it differs from return type's package
+                    // This allows @ComponentScan("infra") to find @Singleton fun provideRepo(): domain.Repository
+                    val funcPackage = funcInfo.functionPackageName
+                    val returnTypePackage = funcInfo.returnTypeClassId.packageFqName.asString()
+
                     createTopLevelFunction(
                         Key,
                         callableId,
@@ -1556,6 +1565,11 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                         // Additional parameters: bindings, scope, qualifier metadata
                         for ((paramName, paramType) in metadataParams) {
                             valueParameter(paramName, paramType)
+                        }
+                        // Encode function package when it differs from return type package
+                        if (funcPackage != null && funcPackage != returnTypePackage) {
+                            val sanitized = funcPackage.replace(".", "_")
+                            valueParameter(Name.identifier("funcpkg_$sanitized"), session.builtinTypes.unitType.coneType)
                         }
                     }.apply { markAsDeprecatedHidden() }.symbol
                 }
