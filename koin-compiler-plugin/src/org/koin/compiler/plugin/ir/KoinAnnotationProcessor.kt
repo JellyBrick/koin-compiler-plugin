@@ -376,7 +376,7 @@ class KoinAnnotationProcessor(
             KoinPluginLogger.user { "  createdAtStart = true" }
         }
         val qualifier = try { qualifierExtractor.extractFromDeclaration(declaration) } catch (e: Throwable) {
-            KoinPluginLogger.log { "  Could not extract qualifier from ${declaration.name}: ${e.message}" }
+            KoinPluginLogger.debug { "  Could not extract qualifier from declaration: ${e.message}" }
             null
         }
         when (qualifier) {

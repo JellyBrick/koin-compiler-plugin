@@ -305,7 +305,7 @@ class QualifierExtractor(private val context: IrPluginContext) {
                 // Check if the annotation has a value argument (e.g., @Dispatcher(NiaDispatchers.IO))
                 // Use the argument value as the qualifier to differentiate instances
                 val valueArg = try { annotation.getValueArgument(0) } catch (e: Throwable) {
-                    KoinPluginLogger.log { "  Could not read qualifier value argument for @$qualifierName: ${e.message}" }
+                    KoinPluginLogger.debug { "  Could not read qualifier value argument for @$qualifierName: ${e.message}" }
                     null
                 }
                 if (valueArg is IrGetEnumValueImpl) {

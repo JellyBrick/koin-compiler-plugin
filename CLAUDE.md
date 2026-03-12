@@ -217,5 +217,5 @@ Set `skipDefaultValues = false` to always inject all parameters from the DI cont
 
 ## Compatibility
 
-- **Koin**: 4.2.0-RC1+
+- **Koin**: 4.2.0-RC2+
 - **Kotlin**: K2 compiler required (2.3.x+)
