@@ -113,7 +113,16 @@ class KoinDSLTransformer(
         val previousContext = transformContext
         transformContext = transformContext.copy(lambda = expression.function)
         val result = super.visitFunctionExpression(expression)
+        // Preserve qualifier propagation from inner create(::T) across lambda boundary
+        val innerQualifier = transformContext.createQualifier
+        val innerReturnClass = transformContext.createReturnClass
         transformContext = previousContext
+        if (innerQualifier != null) {
+            transformContext = transformContext.copy(
+                createQualifier = innerQualifier,
+                createReturnClass = innerReturnClass
+            )
+        }
         return result
     }
 
@@ -121,7 +130,16 @@ class KoinDSLTransformer(
         val previousContext = transformContext
         transformContext = transformContext.copy(function = declaration)
         val result = super.visitFunction(declaration)
+        // Preserve qualifier propagation from inner create(::T) across function boundary
+        val innerQualifier = transformContext.createQualifier
+        val innerReturnClass = transformContext.createReturnClass
         transformContext = previousContext
+        if (innerQualifier != null) {
+            transformContext = transformContext.copy(
+                createQualifier = innerQualifier,
+                createReturnClass = innerReturnClass
+            )
+        }
         return result
     }
 
@@ -400,7 +418,7 @@ class KoinDSLTransformer(
             }
             is IrSimpleFunction -> {
                 // Extract qualifier from function for propagation to enclosing definition
-                val funcQualifier = qualifierExtractor.extractFromDeclaration(referencedFunction)
+                val funcQualifier = qualifierExtractor.extractFromDeclaration(referencedFunction, "function ${referencedFunction.name}")
                 if (funcQualifier != null && currentDefinitionCall != null) {
                     transformContext = transformContext.copy(
                         createQualifier = funcQualifier,
