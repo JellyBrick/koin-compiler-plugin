@@ -41,13 +41,18 @@ class KoinGradlePlugin : KotlinCompilerPluginSupportPlugin {
         val project = kotlinCompilation.target.project
         val extension = project.extensions.getByType(KoinGradleExtension::class.java)
 
+        // Disable compileSafety for test source sets — test compilations see main source set
+        // classes as binary dependencies, which lack full graph visibility and produce false positives.
+        val isTestCompilation = kotlinCompilation.name != KotlinCompilation.MAIN_COMPILATION_NAME
+        val effectiveCompileSafety = if (isTestCompilation) false else extension.compileSafety.get()
+
         return project.provider {
             listOf(
                 SubpluginOption(OPTION_USER_LOGS, extension.userLogs.get().toString()),
                 SubpluginOption(OPTION_DEBUG_LOGS, extension.debugLogs.get().toString()),
                 SubpluginOption(OPTION_UNSAFE_DSL_CHECKS, extension.unsafeDslChecks.get().toString()),
                 SubpluginOption(OPTION_SKIP_DEFAULT_VALUES, extension.skipDefaultValues.get().toString()),
-                SubpluginOption(OPTION_COMPILE_SAFETY, extension.compileSafety.get().toString())
+                SubpluginOption(OPTION_COMPILE_SAFETY, effectiveCompileSafety.toString())
             )
         }
     }
