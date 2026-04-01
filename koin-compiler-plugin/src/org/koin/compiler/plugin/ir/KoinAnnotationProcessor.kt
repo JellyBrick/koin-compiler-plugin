@@ -33,6 +33,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.koin.compiler.plugin.KoinAnnotationFqNames
+import org.koin.compiler.plugin.KoinPluginConstants
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.ProvidedTypeRegistry
 import org.koin.compiler.plugin.PropertyValueRegistry
@@ -95,6 +96,10 @@ class KoinAnnotationProcessor(
     private val moduleClasses = mutableListOf<ModuleClass>()
     private val definitionClasses = mutableListOf<DefinitionClass>()
     private val definitionTopLevelFunctions = mutableListOf<DefinitionTopLevelFunction>()
+
+    /** Unresolved A2 dependencies -- will be emitted as demand hints. */
+    private val allUnresolvedDemands = mutableListOf<UnresolvedDependency>()
+    val unresolvedDemands: List<UnresolvedDependency> get() = allUnresolvedDemands
 
     /** Exposed for cross-phase validation (A3: startKoin full-graph). */
     val collectedModuleClasses: List<ModuleClass> get() = moduleClasses
@@ -674,12 +679,18 @@ class KoinAnnotationProcessor(
                 val visibilityResult = buildVisibleDefinitions(moduleClass, definitions, moduleDefinitions)
                 if (visibilityResult.isComplete) {
                     val moduleFqName = moduleClass.irClass.fqNameWhenAvailable?.asString()
-                    safetyValidator.validate(
+                    // Use deferred validation — collect unresolved types as demand hints
+                    // instead of erroring. The @KoinApplication module will validate them in Phase 3.7.
+                    val unresolved = safetyValidator.validateDeferred(
                         moduleClass.irClass.name.asString(),
                         moduleFqName,
                         definitions,
                         visibilityResult.definitions
                     )
+                    if (unresolved.isNotEmpty()) {
+                        allUnresolvedDemands.addAll(unresolved)
+                        KoinPluginLogger.debug { "  A2: ${unresolved.size} unresolved demands -> will generate demand hints" }
+                    }
                 } else {
                     KoinPluginLogger.debug { "  Skipping A2 validation for ${moduleClass.irClass.name}: dependency module definitions incomplete (hint functions unavailable)" }
                 }
@@ -798,6 +809,126 @@ class KoinAnnotationProcessor(
      * Pattern based on Metro's HintGenerator: creates a synthetic FirFile + IrFileImpl per hint
      * and registers the function for metadata serialization.
      */
+    /**
+     * Generate demand hint functions for unresolved A2 dependencies.
+     * Each unresolved type gets a `demand(required: TargetType)` function
+     * in org.koin.plugin.hints, discoverable by downstream @KoinApplication modules.
+     */
+    fun generateDemandHints(moduleFragment: IrModuleFragment) {
+        if (allUnresolvedDemands.isEmpty()) return
+
+        val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
+        val hintName = Name.identifier(KoinPluginConstants.DEMAND_HINT_NAME)
+
+        // Deduplicate by type FqName
+        val uniqueTypes = allUnresolvedDemands
+            .mapNotNull { it.typeKey.classId }
+            .distinctBy { it.asFqNameString() }
+
+        KoinPluginLogger.debug { "Generating ${uniqueTypes.size} demand hints" }
+
+        // Get FIR module data from current module
+        val firModuleData = moduleFragment.files.firstNotNullOfOrNull { file ->
+            when (val meta = file.metadata) {
+                is FirMetadataSource.File -> meta.fir.moduleData
+                is FirMetadataSource.Class -> meta.fir.moduleData
+                else -> null
+            }
+        }
+        if (firModuleData == null) {
+            KoinPluginLogger.debug { "  WARN: No FIR module data available, skipping demand hint generation" }
+            return
+        }
+
+        val hintFunctions = mutableListOf<IrSimpleFunction>()
+
+        for (classId in uniqueTypes) {
+            val irClassSymbol = context.referenceClass(classId) ?: continue
+            val irClass = irClassSymbol.owner
+
+            val function = context.irFactory.createSimpleFunction(
+                startOffset = UNDEFINED_OFFSET,
+                endOffset = UNDEFINED_OFFSET,
+                origin = IrDeclarationOrigin.DEFINED,
+                name = hintName,
+                visibility = DescriptorVisibilities.INTERNAL,
+                isInline = false,
+                isExpect = false,
+                returnType = context.irBuiltIns.unitType,
+                modality = Modality.FINAL,
+                symbol = IrSimpleFunctionSymbolImpl(),
+                isTailrec = false,
+                isSuspend = false,
+                isOperator = false,
+                isInfix = false,
+                isExternal = false,
+                containerSource = null,
+                isFakeOverride = false
+            )
+
+            val valueParam = context.irFactory.createValueParameter(
+                startOffset = UNDEFINED_OFFSET,
+                endOffset = UNDEFINED_OFFSET,
+                origin = IrDeclarationOrigin.DEFINED,
+                name = Name.identifier("required"),
+                type = irClass.defaultType,
+                isAssignable = false,
+                symbol = IrValueParameterSymbolImpl(),
+                index = 0,
+                varargElementType = null,
+                isCrossinline = false,
+                isNoinline = false,
+                isHidden = false
+            )
+            valueParam.parent = function
+            function.valueParameters = listOf(valueParam)
+            function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+            function.addDeprecatedHiddenAnnotation(context)
+
+            hintFunctions.add(function)
+            KoinPluginLogger.debug { "  + demand hint: ${irClass.fqNameWhenAvailable}" }
+        }
+
+        if (hintFunctions.isEmpty()) return
+
+        // Create a single IrFile for all demand hints
+        val batchFileName = "koin_demand_hints.kt"
+        val firFile = buildFile {
+            moduleData = firModuleData
+            origin = FirDeclarationOrigin.Synthetic.PluginFile
+            packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+            name = batchFileName
+        }
+
+        val sourceFileEntry = moduleFragment.files.firstNotNullOfOrNull { file ->
+            try {
+                val entry = file.fileEntry
+                if (entry.name.contains("/") || entry.name.contains("\\")) entry else null
+            } catch (_: Exception) { null }
+        }
+        if (sourceFileEntry == null) {
+            KoinPluginLogger.debug { "  WARN: No valid source file entry, skipping demand hint generation" }
+            return
+        }
+
+        val fakeNewPath = Path(sourceFileEntry.name).parent.resolve(batchFileName)
+        val hintFile = IrFileImpl(
+            fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
+            packageFragmentDescriptor = EmptyPackageFragmentDescriptor(moduleFragment.descriptor, hintsPackage),
+            module = moduleFragment
+        ).also { it.metadata = FirMetadataSource.File(firFile) }
+
+        moduleFragment.addFile(hintFile)
+
+        for (func in hintFunctions) {
+            hintFile.addChild(func)
+            func.parent = hintFile
+            context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
+        }
+
+        KoinPluginLogger.debug { "  Batched ${hintFunctions.size} demand hints into $batchFileName" }
+    }
+
     private fun generateModuleScanHints(
         moduleFragment: IrModuleFragment,
         moduleDefinitions: Map<ModuleClass, List<Definition>>

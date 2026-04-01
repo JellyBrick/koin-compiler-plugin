@@ -89,6 +89,9 @@ object KoinPluginConstants {
     /** Function name for call-site hints (deferred validation across modules). */
     const val CALLSITE_HINT_NAME = "callsite"
 
+    /** Function name for demand hints (deferred A2 validation across modules). */
+    const val DEMAND_HINT_NAME = "demand"
+
     /** Prefix for module property ID parameter in DSL hint functions (cross-module reachability). */
     const val DSL_MODULE_PARAM_PREFIX = "module_"
 

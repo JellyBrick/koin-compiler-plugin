@@ -12,6 +12,18 @@ import org.koin.compiler.plugin.ProvidedTypeRegistry
 import org.koin.compiler.plugin.PropertyValueRegistry
 
 /**
+ * An unresolved dependency collected during deferred A2 validation.
+ * Instead of reporting an error immediately, unresolved dependencies are collected
+ * and emitted as "demand hints" for downstream @KoinApplication modules to validate.
+ */
+data class UnresolvedDependency(
+    val typeKey: TypeKey,
+    val defName: String,
+    val moduleName: String,
+    val requirement: Requirement
+)
+
+/**
  * Identifies a provided type in the DI container.
  *
  * @param classId The ClassId of the type (for serializable cross-module comparisons)
@@ -109,7 +121,8 @@ class BindingRegistry {
         definitions: List<Definition>,
         parameterAnalyzer: ParameterAnalyzer,
         qualifierExtractor: QualifierExtractor,
-        definitionsToValidate: List<Definition>? = null
+        definitionsToValidate: List<Definition>? = null,
+        unresolvedCollector: MutableList<UnresolvedDependency>? = null
     ): Int {
         // Build the set of provided types from ALL definitions
         val providedTypes = mutableSetOf<ProviderKey>()
@@ -193,7 +206,12 @@ class BindingRegistry {
                     KoinPluginLogger.debug { "      OK '${req.paramName}': ${req.typeKey.render()}" }
                 } else {
                     KoinPluginLogger.debug { "      MISSING '${req.paramName}': ${req.typeKey.render()}" }
-                    reportMissingDependency(req, defName, moduleName, providedTypes)
+                    if (unresolvedCollector != null) {
+                        // Deferred mode: collect unresolved dependency instead of reporting error
+                        unresolvedCollector.add(UnresolvedDependency(req.typeKey, defName, moduleName, req))
+                    } else {
+                        reportMissingDependency(req, defName, moduleName, providedTypes)
+                    }
                     errorCount++
                 }
             }

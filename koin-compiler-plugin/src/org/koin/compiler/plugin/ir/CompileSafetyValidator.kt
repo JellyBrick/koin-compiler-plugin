@@ -77,6 +77,48 @@ class CompileSafetyValidator(
     }
 
     /**
+     * A2 (deferred): Validate a module's definitions, collecting unresolved dependencies
+     * instead of reporting errors. Used in non-@KoinApplication modules to generate
+     * demand hints for downstream validation.
+     *
+     * @return List of unresolved dependencies (empty if all satisfied)
+     */
+    fun validateDeferred(
+        moduleName: String,
+        moduleFqName: String?,
+        ownDefinitions: List<Definition>,
+        allVisibleDefinitions: List<Definition>
+    ): List<UnresolvedDependency> {
+        KoinPluginLogger.debug { "── A2 Safety (deferred): $moduleName ──" }
+        KoinPluginLogger.debug { "  own=${ownDefinitions.size}, visible=${allVisibleDefinitions.size}" }
+        KoinPluginLogger.debug { "  -> VALIDATING (deferred)..." }
+
+        val registry = BindingRegistry()
+        val unresolved = mutableListOf<UnresolvedDependency>()
+        registry.validateModule(
+            moduleName,
+            allVisibleDefinitions,
+            parameterAnalyzer,
+            qualifierExtractor,
+            ownDefinitions,
+            unresolvedCollector = unresolved
+        )
+
+        // Mark as validated to prevent duplicate reporting at A3
+        if (moduleFqName != null) {
+            validatedModuleFqNames.add(moduleFqName)
+        }
+
+        if (unresolved.isNotEmpty()) {
+            KoinPluginLogger.debug { "  -> DONE (deferred): ${unresolved.size} unresolved demands" }
+        } else {
+            KoinPluginLogger.debug { "  -> DONE (deferred): all dependencies satisfied" }
+        }
+
+        return unresolved
+    }
+
+    /**
      * A3: Validate the full assembled module graph at the startKoin entry point.
      *
      * Collects ALL definitions from ALL discovered modules and validates that
