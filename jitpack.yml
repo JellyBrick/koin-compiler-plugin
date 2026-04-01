@@ -1,0 +1,5 @@
+jdk:
+  - openjdk17
+
+install:
+  - ./gradlew :koin-compiler-plugin:publishToMavenLocal :koin-compiler-gradle-plugin:publishToMavenLocal -x test --no-configuration-cache
