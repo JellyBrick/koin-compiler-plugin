@@ -30,6 +30,15 @@ import kotlin.io.path.absolutePathString
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 class CallSiteValidator(private val context: IrPluginContext) {
 
+    // Cache for referenceFunctions lookups to avoid repeated symbol table scans
+    private val referenceFunctionsCache = mutableMapOf<CallableId, Collection<org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol>>()
+
+    private fun cachedReferenceFunctions(callableId: CallableId): Collection<org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol> {
+        return referenceFunctionsCache.getOrPut(callableId) {
+            context.referenceFunctions(callableId).toList()
+        }
+    }
+
     /**
      * A4: Validate pending call-site resolutions against the assembled graph.
      * Simple loop -- no tree walk needed.
@@ -268,7 +277,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
         val hintFunctionName = Name.identifier(KoinPluginConstants.CALLSITE_HINT_NAME)
 
-        val hintFunctions = context.referenceFunctions(CallableId(hintsPackage, hintFunctionName))
+        val hintFunctions = cachedReferenceFunctions(CallableId(hintsPackage, hintFunctionName))
         if (hintFunctions.isEmpty()) return
 
         // Build the set of all known provided types
@@ -350,7 +359,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
         val hintFunctionName = Name.identifier(KoinPluginConstants.DEMAND_HINT_NAME)
 
-        val hintFunctions = context.referenceFunctions(CallableId(hintsPackage, hintFunctionName))
+        val hintFunctions = cachedReferenceFunctions(CallableId(hintsPackage, hintFunctionName))
         if (hintFunctions.isEmpty()) {
             KoinPluginLogger.debug { "Phase 3.7: No demand hints found in dependencies" }
             return

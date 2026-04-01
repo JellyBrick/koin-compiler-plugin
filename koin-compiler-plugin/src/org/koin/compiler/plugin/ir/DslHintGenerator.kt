@@ -29,6 +29,12 @@ import kotlin.io.path.absolutePathString
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 class DslHintGenerator(private val context: IrPluginContext) {
 
+    // Caches for hint discovery — avoid repeated context.referenceFunctions() calls
+    // which are expensive symbol table scans. These are populated on first access
+    // and reused across Phase 3.1, 3.5, 3.6, and 3.7 validations.
+    private var cachedDslDefinitionTypes: Set<String>? = null
+    private var cachedDslDefinitionsFromHints: List<Definition.DslDef>? = null
+
     /**
      * Generate DSL definition hint functions for cross-module discovery.
      * For each DSL definition (single<T>, factory<T>, etc.), generates a hint function
@@ -303,6 +309,8 @@ class DslHintGenerator(private val context: IrPluginContext) {
      * all provided types (concrete + bindings).
      */
     fun discoverDslDefinitionTypes(): Set<String> {
+        cachedDslDefinitionTypes?.let { return it }
+
         val types = mutableSetOf<String>()
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
 
@@ -323,6 +331,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
             KoinPluginLogger.debug { "  Discovered ${types.size} DSL definition types from dependency hints" }
         }
 
+        cachedDslDefinitionTypes = types
         return types
     }
 
@@ -331,6 +340,8 @@ class DslHintGenerator(private val context: IrPluginContext) {
      * Returns synthetic DslDef objects that serve as providers in graph validation.
      */
     fun discoverDslDefinitionsFromHints(): List<Definition.DslDef> {
+        cachedDslDefinitionsFromHints?.let { return it }
+
         val definitions = mutableListOf<Definition.DslDef>()
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
         val defTypeMapping = mapOf(
@@ -397,6 +408,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
             KoinPluginLogger.debug { "  Discovered ${definitions.size} DSL definitions from dependency hints" }
         }
 
+        cachedDslDefinitionsFromHints = definitions
         return definitions
     }
 }
