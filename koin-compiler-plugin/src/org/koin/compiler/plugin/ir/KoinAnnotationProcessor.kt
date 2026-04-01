@@ -1216,7 +1216,7 @@ class KoinAnnotationProcessor(
         val packageName = moduleClass.fqNameWhenAvailable?.parent() ?: return null
 
         // Query existing module() functions in this package
-        val candidates = context.referenceFunctions(
+        val candidates = cachedReferenceFunctions(
             CallableId(packageName, Name.identifier("module"))
         )
 
@@ -1254,7 +1254,7 @@ class KoinAnnotationProcessor(
 
         KoinPluginLogger.debug { "    -> Generating module body with ${definitions.size} definitions" }
 
-        val moduleDslFunction = context.referenceFunctions(
+        val moduleDslFunction = cachedReferenceFunctions(
             CallableId(KoinAnnotationFqNames.MODULE_DSL, Name.identifier("module"))
         ).firstOrNull { it.owner.valueParameters.any { p ->
             p.name.asString() == "moduleDeclaration"
@@ -1292,7 +1292,7 @@ class KoinAnnotationProcessor(
      */
     private fun generateErrorStubBody(function: IrSimpleFunction) {
         val builder = DeclarationIrBuilder(context, function.symbol, UNDEFINED_OFFSET, UNDEFINED_OFFSET)
-        val errorFunction = context.referenceFunctions(
+        val errorFunction = cachedReferenceFunctions(
             CallableId(FqName("kotlin"), Name.identifier("error"))
         ).firstOrNull()
         if (errorFunction != null) {
@@ -2415,7 +2415,7 @@ class KoinAnnotationProcessor(
         builder: DeclarationIrBuilder
     ): IrExpression? {
         // Find the includes function: Module.includes(vararg Module)
-        val includesFunction = context.referenceFunctions(
+        val includesFunction = cachedReferenceFunctions(
             CallableId(FqName("org.koin.plugin.module.dsl"), Name.identifier("includes"))
         ).firstOrNull { it.owner.extensionReceiverParameter?.type?.classFqName?.asString() == KoinAnnotationFqNames.KOIN_MODULE.asString() }?.owner
             ?: return null
@@ -2452,7 +2452,7 @@ class KoinAnnotationProcessor(
      */
     private fun findModuleFunctionViaContext(moduleClass: IrClass): IrSimpleFunction? {
         val packageName = moduleClass.fqNameWhenAvailable?.parent() ?: return null
-        val functionCandidates = context.referenceFunctions(
+        val functionCandidates = cachedReferenceFunctions(
             CallableId(packageName, Name.identifier("module"))
         )
 
