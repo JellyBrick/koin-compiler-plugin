@@ -34,6 +34,7 @@ class KoinIrExtension(
         // Generates: fun MyModule.module() = module { single<A>(); factory<B>() }
         KoinPluginLogger.debug { "Phase 1: Processing annotations" }
         val annotationProcessor = KoinAnnotationProcessor(pluginContext, qualifierExtractor, safetyValidator, lookupTracker, expectActualTracker)
+        annotationProcessor.initSourceModuleData(moduleFragment)
         annotationProcessor.collectAnnotations(moduleFragment)
         annotationProcessor.generateModuleExtensions(moduleFragment)
 

@@ -833,19 +833,8 @@ class KoinAnnotationProcessor(
 
         KoinPluginLogger.debug { "Generating ${uniqueTypes.size} demand hints" }
 
-        // Get FIR module data from current (source) module — skip binary dependencies
-        // whose FirBinaryDependenciesModuleData throws "should not be called" on getPlatform()
-        val firModuleData = moduleFragment.files.firstNotNullOfOrNull { file ->
-            when (val meta = file.metadata) {
-                is FirMetadataSource.File -> meta.fir.moduleData.takeUnless {
-                    it::class.simpleName == "FirBinaryDependenciesModuleData"
-                }
-                is FirMetadataSource.Class -> meta.fir.moduleData.takeUnless {
-                    it::class.simpleName == "FirBinaryDependenciesModuleData"
-                }
-                else -> null
-            }
-        }
+        // Use cached source module data (initialized in generateModuleExtensions)
+        val firModuleData = sourceModuleData
         if (firModuleData == null) {
             KoinPluginLogger.debug { "  WARN: No FIR module data available, skipping demand hint generation" }
             return
@@ -1100,6 +1089,35 @@ class KoinAnnotationProcessor(
         return function
     }
 
+    /**
+     * Cached source module data for the current compilation unit.
+     * Populated once from moduleFragment.files during generateModuleExtensions,
+     * then reused for all hint/demand hint generation.
+     * This avoids ever touching FirBinaryDependenciesModuleData which throws
+     * "should not be called" on getPlatform().
+     */
+    private var sourceModuleData: FirModuleData? = null
+
+    /** Initialize source module data from the module fragment's own files. */
+    fun initSourceModuleData(moduleFragment: IrModuleFragment) {
+        sourceModuleData = moduleFragment.files.firstNotNullOfOrNull { file ->
+            val data = when (val meta = file.metadata) {
+                is FirMetadataSource.File -> meta.fir.moduleData
+                is FirMetadataSource.Class -> meta.fir.moduleData
+                else -> null
+            }
+            // Validate: try accessing platform to ensure it's not FirBinaryDependenciesModuleData
+            if (data != null) {
+                try {
+                    data.platform  // Throws on FirBinaryDependenciesModuleData
+                    data
+                } catch (_: IllegalStateException) {
+                    null
+                }
+            } else null
+        }
+    }
+
     /** Extract FIR module data from an IR class's metadata, skipping binary dependency module data. */
     private fun extractFirModuleData(irClass: IrClass): FirModuleData? {
         val moduleData = when (val src = irClass.metadata) {
@@ -1108,12 +1126,15 @@ class KoinAnnotationProcessor(
             is FirMetadataSource.File -> src.fir.moduleData
             else -> null
         }
-        // FirBinaryDependenciesModuleData throws "should not be called" on getPlatform().
-        // This happens during test compilation when main source set classes appear as dependencies.
-        if (moduleData != null && moduleData::class.simpleName == "FirBinaryDependenciesModuleData") {
-            return null
+        if (moduleData == null) return null
+        // Validate: try accessing platform to confirm it's not FirBinaryDependenciesModuleData
+        return try {
+            moduleData.platform
+            moduleData
+        } catch (_: IllegalStateException) {
+            // Fallback to cached source module data
+            sourceModuleData
         }
-        return moduleData
     }
 
     /**
