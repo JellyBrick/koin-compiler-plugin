@@ -833,11 +833,16 @@ class KoinAnnotationProcessor(
 
         KoinPluginLogger.debug { "Generating ${uniqueTypes.size} demand hints" }
 
-        // Get FIR module data from current module
+        // Get FIR module data from current (source) module — skip binary dependencies
+        // whose FirBinaryDependenciesModuleData throws "should not be called" on getPlatform()
         val firModuleData = moduleFragment.files.firstNotNullOfOrNull { file ->
             when (val meta = file.metadata) {
-                is FirMetadataSource.File -> meta.fir.moduleData
-                is FirMetadataSource.Class -> meta.fir.moduleData
+                is FirMetadataSource.File -> meta.fir.moduleData.takeUnless {
+                    it::class.simpleName == "FirBinaryDependenciesModuleData"
+                }
+                is FirMetadataSource.Class -> meta.fir.moduleData.takeUnless {
+                    it::class.simpleName == "FirBinaryDependenciesModuleData"
+                }
                 else -> null
             }
         }
@@ -1095,14 +1100,20 @@ class KoinAnnotationProcessor(
         return function
     }
 
-    /** Extract FIR module data from an IR class's metadata. */
+    /** Extract FIR module data from an IR class's metadata, skipping binary dependency module data. */
     private fun extractFirModuleData(irClass: IrClass): FirModuleData? {
-        return when (val src = irClass.metadata) {
+        val moduleData = when (val src = irClass.metadata) {
             is FirMetadataSource.Class -> src.fir.moduleData
             is FirMetadataSource.Function -> src.fir.moduleData
             is FirMetadataSource.File -> src.fir.moduleData
             else -> null
         }
+        // FirBinaryDependenciesModuleData throws "should not be called" on getPlatform().
+        // This happens during test compilation when main source set classes appear as dependencies.
+        if (moduleData != null && moduleData::class.simpleName == "FirBinaryDependenciesModuleData") {
+            return null
+        }
+        return moduleData
     }
 
     /**
