@@ -126,22 +126,25 @@ class KoinAnnotationProcessor(
         // Follow @Module(includes = [...]) to collect included module definitions.
         // Included modules may not be @Configuration, so they won't appear in the top-level
         // module list. We must collect their definitions here for A3 full-graph validation.
-        val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toMutableSet()
+        // Build mutable set without intermediate list allocation
+        val existingFqNames = mutableSetOf<FqName>().also { set ->
+            for (def in definitions) { def.returnTypeClass.fqNameWhenAvailable?.let { set.add(it) } }
+        }
+        val modulesByFqName = getModulesByFqName()
         for (included in moduleClass.includedModules) {
             val includedFqName = included.fqNameWhenAvailable?.asString() ?: continue
-            val localIncluded = collectedModuleClasses.find {
-                it.irClass.fqNameWhenAvailable == included.fqNameWhenAvailable
-            }
+            // Use cached map for O(1) lookup instead of .find() linear scan
+            val localIncluded = modulesByFqName[includedFqName]
             if (localIncluded != null) {
                 val newDefs = collectAllDefinitions(localIncluded).filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
                 definitions.addAll(newDefs)
-                existingFqNames.addAll(newDefs.mapNotNull { it.returnTypeClass.fqNameWhenAvailable })
+                for (def in newDefs) { def.returnTypeClass.fqNameWhenAvailable?.let { existingFqNames.add(it) } }
             } else {
                 val result = collectDefinitionsFromDependencyModule(includedFqName, visited)
                 if (!result.isComplete) allComplete = false
                 val newDefs = result.definitions.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
                 definitions.addAll(newDefs)
-                existingFqNames.addAll(newDefs.mapNotNull { it.returnTypeClass.fqNameWhenAvailable })
+                for (def in newDefs) { def.returnTypeClass.fqNameWhenAvailable?.let { existingFqNames.add(it) } }
             }
         }
 
@@ -1513,6 +1516,13 @@ class KoinAnnotationProcessor(
     private fun discoverDefinitionsFromHints(scanPackages: List<String>): List<DefinitionClass> {
         val discovered = mutableListOf<DefinitionClass>()
 
+        // Pre-build Set of known definition FqNames for O(1) duplicate checking
+        val knownDefinitionFqNames = buildSet<FqName> {
+            for (defClass in definitionClasses) {
+                defClass.irClass.fqNameWhenAvailable?.let { add(it) }
+            }
+        }
+
         // Query each definition type
         for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
             val functionName = KoinModuleFirGenerator.definitionHintFunctionName(defType)
@@ -1532,8 +1542,9 @@ class KoinAnnotationProcessor(
                 val defPackage = defClass.packageFqName?.asString() ?: continue
                 if (!matchesScanPackages(defPackage, scanPackages)) continue
 
-                // Skip if we already have this class in local definitions (avoid duplicates)
-                if (definitionClasses.any { it.irClass.fqNameWhenAvailable == defClass.fqNameWhenAvailable }) {
+                // Skip if we already have this class in local definitions (O(1) Set lookup)
+                val defFqName = defClass.fqNameWhenAvailable
+                if (defFqName != null && defFqName in knownDefinitionFqNames) {
                     KoinPluginLogger.debug { "    Skipping ${defClass.name} - already in local definitions" }
                     continue
                 }
@@ -1576,6 +1587,13 @@ class KoinAnnotationProcessor(
     private fun discoverFunctionDefinitionsFromHints(scanPackages: List<String>): List<Definition.ExternalFunctionDef> {
         val discovered = mutableListOf<Definition.ExternalFunctionDef>()
 
+        // Pre-build Set of known function def FqNames for O(1) duplicate checking
+        val knownFuncDefFqNames = buildSet<FqName> {
+            for (funcDef in definitionTopLevelFunctions) {
+                funcDef.returnTypeClass.fqNameWhenAvailable?.let { add(it) }
+            }
+        }
+
         for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
             val functionName = KoinModuleFirGenerator.definitionFunctionHintFunctionName(defType)
             val hintFunctions = cachedReferenceFunctions(
@@ -1601,8 +1619,9 @@ class KoinAnnotationProcessor(
                 val matchesFunctionPackage = functionPackage != null && matchesScanPackages(functionPackage, scanPackages)
                 if (!matchesReturnTypePackage && !matchesFunctionPackage) continue
 
-                // Skip if we already have this type in local top-level function definitions
-                if (definitionTopLevelFunctions.any { it.returnTypeClass.fqNameWhenAvailable == returnTypeClass.fqNameWhenAvailable }) {
+                // Skip if we already have this type in local top-level function definitions (O(1) Set lookup)
+                val funcFqName = returnTypeClass.fqNameWhenAvailable
+                if (funcFqName != null && funcFqName in knownFuncDefFqNames) {
                     KoinPluginLogger.debug { "    Skipping ${returnTypeClass.name} - already in local function definitions" }
                     continue
                 }
@@ -1683,7 +1702,7 @@ class KoinAnnotationProcessor(
             definitions.addAll(scanDefs)
 
             // Fallback: orphan hints (definition_* / definitionfunc_*) in the module's package
-            val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toSet()
+            val existingFqNames = buildSet<FqName> { for (def in definitions) { def.returnTypeClass.fqNameWhenAvailable?.let { add(it) } } }
             val orphanDefs = discoverClassDefinitionsFromHints(listOf(modulePackage))
             val orphanFuncDefs = discoverFunctionDefinitionsFromHints(listOf(modulePackage))
             definitions.addAll(orphanDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames })
@@ -1734,7 +1753,7 @@ class KoinAnnotationProcessor(
             val orphanDefs = discoverClassDefinitionsFromHints(effectiveScanPackages)
             val orphanFuncDefs = discoverFunctionDefinitionsFromHints(effectiveScanPackages)
             // Deduplicate — scan hints may overlap with orphan hints
-            val existingFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toSet()
+            val existingFqNames = buildSet<FqName> { for (def in definitions) { def.returnTypeClass.fqNameWhenAvailable?.let { add(it) } } }
             val newOrphanDefs = orphanDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
             val newOrphanFuncDefs = orphanFuncDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
             definitions.addAll(newOrphanDefs)
@@ -1748,13 +1767,15 @@ class KoinAnnotationProcessor(
         //    @Configuration, so they won't appear in the top-level module list. We must collect
         //    their definitions here to make them visible for A3 full-graph validation.
         val includedModules = getModuleIncludes(moduleIrClass)
-        val knownFqNames = definitions.mapNotNull { it.returnTypeClass.fqNameWhenAvailable }.toMutableSet()
+        // Build mutable set without intermediate list allocation
+        val knownFqNames = mutableSetOf<FqName>().also { set ->
+            for (def in definitions) { def.returnTypeClass.fqNameWhenAvailable?.let { set.add(it) } }
+        }
+        val modulesByFqName = getModulesByFqName()
         for (included in includedModules) {
             val includedFqName = included.fqNameWhenAvailable?.asString() ?: continue
-            // Check if already collected locally (avoid re-processing)
-            val localModuleClass = collectedModuleClasses.find {
-                it.irClass.fqNameWhenAvailable == included.fqNameWhenAvailable
-            }
+            // Use cached map for O(1) lookup instead of .find() linear scan
+            val localModuleClass = modulesByFqName[includedFqName]
             val newDefs = if (localModuleClass != null) {
                 // Included module is local — use collectAllDefinitions
                 val includedDefs = collectAllDefinitions(localModuleClass)
@@ -1765,7 +1786,7 @@ class KoinAnnotationProcessor(
                 includedResult.definitions.filter { it.returnTypeClass.fqNameWhenAvailable !in knownFqNames }
             }
             definitions.addAll(newDefs)
-            knownFqNames.addAll(newDefs.mapNotNull { it.returnTypeClass.fqNameWhenAvailable })
+            for (def in newDefs) { def.returnTypeClass.fqNameWhenAvailable?.let { knownFqNames.add(it) } }
             val source = if (localModuleClass != null) "local" else "dependency"
             KoinPluginLogger.debug { "      Included ($source) $includedFqName: ${newDefs.size} new definitions" }
         }
@@ -1814,6 +1835,8 @@ class KoinAnnotationProcessor(
         val moduleClassId = ClassId.topLevel(FqName(moduleFqName))
         val sanitizedId = KoinModuleFirGenerator.sanitizeModuleIdForHint(moduleClassId)
         val definitions = mutableListOf<Definition>()
+        // Pre-built Set for O(1) duplicate checking instead of .any() linear scan
+        val seenFqNames = mutableSetOf<FqName>()
 
         KoinPluginLogger.debug { "      Querying module-scan hints for $moduleFqName (id=$sanitizedId)" }
 
@@ -1829,8 +1852,9 @@ class KoinAnnotationProcessor(
                 val paramType = hintFunc.valueParameters.firstOrNull()?.type ?: continue
                 val defClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
 
-                // Skip duplicates
-                if (definitions.any { it.returnTypeClass.fqNameWhenAvailable == defClass.fqNameWhenAvailable }) continue
+                // Skip duplicates using Set for O(1) lookup
+                val fqName = defClass.fqNameWhenAvailable ?: continue
+                if (!seenFqNames.add(fqName)) continue
 
                 val definitionType = parseDefinitionType(defType) ?: continue
 
@@ -1862,7 +1886,8 @@ class KoinAnnotationProcessor(
                 val paramType = funcParams.firstOrNull()?.type ?: continue
                 val returnTypeClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
 
-                if (definitions.any { it.returnTypeClass.fqNameWhenAvailable == returnTypeClass.fqNameWhenAvailable }) continue
+                val funcFqName = returnTypeClass.fqNameWhenAvailable ?: continue
+                if (!seenFqNames.add(funcFqName)) continue
 
                 val definitionType = parseDefinitionType(defType) ?: continue
 
@@ -2152,10 +2177,17 @@ class KoinAnnotationProcessor(
             }
         }
 
-        // Separate definitions by scope type
-        val rootDefinitions = definitions.filter { it.scopeClass == null && it.scopeArchetype == null }
-        val scopedDefinitions = definitions.filter { it.scopeClass != null }
-        val archetypeDefinitions = definitions.filter { it.scopeArchetype != null && it.scopeClass == null }
+        // Single-pass partition of definitions by scope type (avoids 3 separate filter passes)
+        val rootDefinitions = mutableListOf<Definition>()
+        val scopedDefinitions = mutableListOf<Definition>()
+        val archetypeDefinitions = mutableListOf<Definition>()
+        for (def in definitions) {
+            when {
+                def.scopeClass != null -> scopedDefinitions.add(def)
+                def.scopeArchetype != null -> archetypeDefinitions.add(def)
+                else -> rootDefinitions.add(def)
+            }
+        }
         val scopeGroups = scopedDefinitions.groupBy { it.scopeClass!! }
         val archetypeGroups = archetypeDefinitions.groupBy { it.scopeArchetype!! }
 

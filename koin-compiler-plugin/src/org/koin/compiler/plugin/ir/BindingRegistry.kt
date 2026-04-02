@@ -153,6 +153,18 @@ class BindingRegistry {
             }
         }
 
+        // Build indexed lookup for O(1) provider matching by FqName/ClassId string.
+        // This avoids iterating all providers for every requirement in findProvider().
+        val providersByFqName = mutableMapOf<String, MutableList<ProviderKey>>()
+        for (provider in providedTypes) {
+            provider.typeKey.fqName?.asString()?.let { fqName ->
+                providersByFqName.getOrPut(fqName) { mutableListOf() }.add(provider)
+            }
+            provider.typeKey.classId?.asFqNameString()?.let { classIdStr ->
+                providersByFqName.getOrPut(classIdStr) { mutableListOf() }.add(provider)
+            }
+        }
+
         // Only validate requirements from the specified subset (or all if not specified)
         val toValidate = definitionsToValidate ?: definitions
 
@@ -200,8 +212,8 @@ class BindingRegistry {
                     continue
                 }
 
-                // Look for a matching provider
-                val found = findProvider(req, providedTypes, defScopeClass)
+                // Look for a matching provider using the indexed map for O(1) type lookup
+                val found = findProvider(req, providersByFqName, defScopeClass)
                 if (found) {
                     KoinPluginLogger.debug { "      OK '${req.paramName}': ${req.typeKey.render()}" }
                 } else {
@@ -227,26 +239,29 @@ class BindingRegistry {
     }
 
     /**
-     * Search for a provider matching the requirement.
-     * Checks both same-scope and root-scope providers.
+     * Search for a provider matching the requirement using indexed lookup.
+     * Uses the pre-built providersByFqName map for O(1) type matching,
+     * then checks qualifier/scope only on the matched subset.
      */
     private fun findProvider(
         req: Requirement,
-        providedTypes: Set<ProviderKey>,
+        providersByFqName: Map<String, List<ProviderKey>>,
         consumerScopeClass: IrClass?
     ): Boolean {
-        val reqFqName = req.typeKey.fqName
-        val reqClassId = req.typeKey.classId
+        // Collect candidate providers via O(1) map lookup instead of iterating all providers
+        val reqFqNameStr = req.typeKey.fqName?.asString()
+        val reqClassIdStr = req.typeKey.classId?.asFqNameString()
 
-        for (provider in providedTypes) {
-            // Type must match (by FqName or ClassId)
-            val typeMatch = when {
-                reqFqName != null && provider.typeKey.fqName != null -> reqFqName == provider.typeKey.fqName
-                reqClassId != null && provider.typeKey.classId != null -> reqClassId == provider.typeKey.classId
-                else -> false
+        val candidates = buildList {
+            if (reqFqNameStr != null) {
+                providersByFqName[reqFqNameStr]?.let { addAll(it) }
             }
-            if (!typeMatch) continue
+            if (reqClassIdStr != null && reqClassIdStr != reqFqNameStr) {
+                providersByFqName[reqClassIdStr]?.let { addAll(it) }
+            }
+        }
 
+        for (provider in candidates) {
             // Qualifier must match
             if (!qualifiersMatch(req.qualifier, provider.qualifier)) {
                 KoinPluginLogger.debug { "        type match ${req.typeKey.render()} but qualifier mismatch: required=${req.qualifier?.debugString()} vs provided=${provider.qualifier?.debugString()}" }
