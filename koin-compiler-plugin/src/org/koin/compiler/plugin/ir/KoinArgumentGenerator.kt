@@ -48,6 +48,18 @@ class KoinArgumentGenerator(
     private val propertyAnnotationFqName = KoinAnnotationFqNames.PROPERTY
     private val lazyModeClass by lazy { context.referenceClass(ClassId.topLevel(FqName("kotlin.LazyThreadSafetyMode"))) }
 
+    // ── Function lookup caches ──
+    // Scope class functions (get, getOrNull, inject, getAll, getScope, getProperty, etc.)
+    // are looked up by scanning scopeClass.declarations for every parameter of every definition.
+    // With 200 definitions × 5 params = 1000+ lookups, caching eliminates redundant scans.
+    private val scopeGetFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+    private val scopeGetOrNullFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+    private val scopeInjectFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+    private val scopeGetAllFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+    private val scopeGetScopeFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+    private val parameterHolderGetFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+    private val parameterHolderGetOrNullFunctionCache = mutableMapOf<IrClass, IrSimpleFunction?>()
+
     override fun generateForParameter(
         param: IrValueParameter,
         scopeReceiver: IrExpression,
@@ -320,10 +332,12 @@ class KoinArgumentGenerator(
 
         // scope.getScope("scopeId") → returns a named Scope
         // Scope.getScope(id: String): Scope
-        val getScopeFunction = scopeClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .filter { it.name.asString() == "getScope" && it.valueParameters.size == 1 }
-            .firstOrNull { it.valueParameters[0].type.isStringClassType() }
+        val getScopeFunction = scopeGetScopeFunctionCache.getOrPut(scopeClass) {
+            scopeClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .filter { it.name.asString() == "getScope" && it.valueParameters.size == 1 }
+                .firstOrNull { it.valueParameters[0].type.isStringClassType() }
+        }
         if (getScopeFunction == null) {
             KoinPluginLogger.debug { "Could not find getScope(String) on scope class ${scopeClass.name}" }
             return builder.irNull()
@@ -354,12 +368,14 @@ class KoinArgumentGenerator(
         }
 
         // Find getAll function in Scope
-        val getAllFunction = scopeClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .firstOrNull { function ->
-                function.name.asString() == "getAll" &&
-                function.typeParameters.size == 1
-            }
+        val getAllFunction = scopeGetAllFunctionCache.getOrPut(scopeClass) {
+            scopeClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .firstOrNull { function ->
+                    function.name.asString() == "getAll" &&
+                    function.typeParameters.size == 1
+                }
+        }
 
         if (getAllFunction != null) {
             return builder.irCall(getAllFunction.symbol).apply {
@@ -385,14 +401,16 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        val getFunction = scopeClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .filter { function ->
-                function.name.asString() == "get" &&
-                function.typeParameters.size == 1 &&
-                function.valueParameters.all { it.type.isMarkedNullable() }
-            }
-            .minByOrNull { it.valueParameters.size }
+        val getFunction = scopeGetFunctionCache.getOrPut(scopeClass) {
+            scopeClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .filter { function ->
+                    function.name.asString() == "get" &&
+                    function.typeParameters.size == 1 &&
+                    function.valueParameters.all { it.type.isMarkedNullable() }
+                }
+                .minByOrNull { it.valueParameters.size }
+        }
         if (getFunction == null) {
             KoinPluginLogger.debug { "Could not find get() function on scope class ${scopeClass.name} for type ${type.classFqName}" }
             return builder.irNull()
@@ -425,14 +443,16 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        val getOrNullFunction = scopeClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .filter { function ->
-                function.name.asString() == "getOrNull" &&
-                function.typeParameters.size == 1 &&
-                function.valueParameters.all { it.type.isMarkedNullable() }
-            }
-            .minByOrNull { it.valueParameters.size }
+        val getOrNullFunction = scopeGetOrNullFunctionCache.getOrPut(scopeClass) {
+            scopeClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .filter { function ->
+                    function.name.asString() == "getOrNull" &&
+                    function.typeParameters.size == 1 &&
+                    function.valueParameters.all { it.type.isMarkedNullable() }
+                }
+                .minByOrNull { it.valueParameters.size }
+        }
         if (getOrNullFunction == null) {
             KoinPluginLogger.debug { "Could not find getOrNull() function on scope class ${scopeClass.name} for type ${type.classFqName}" }
             return builder.irNull()
@@ -465,13 +485,15 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        val injectFunction = scopeClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .filter { function ->
-                function.name.asString() == "inject" &&
-                function.typeParameters.size == 1
-            }
-            .minByOrNull { it.valueParameters.size }
+        val injectFunction = scopeInjectFunctionCache.getOrPut(scopeClass) {
+            scopeClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .filter { function ->
+                    function.name.asString() == "inject" &&
+                    function.typeParameters.size == 1
+                }
+                .minByOrNull { it.valueParameters.size }
+        }
         if (injectFunction == null) {
             KoinPluginLogger.debug { "Could not find inject() function on scope class ${scopeClass.name} for type ${type.classFqName}" }
             return builder.irNull()
@@ -520,13 +542,15 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        val getFunction = parametersHolderClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .firstOrNull { function ->
-                function.name.asString() == "get" &&
-                function.typeParameters.size == 1 &&
-                function.valueParameters.isEmpty()
-            }
+        val getFunction = parameterHolderGetFunctionCache.getOrPut(parametersHolderClass) {
+            parametersHolderClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .firstOrNull { function ->
+                    function.name.asString() == "get" &&
+                    function.typeParameters.size == 1 &&
+                    function.valueParameters.isEmpty()
+                }
+        }
         if (getFunction == null) {
             KoinPluginLogger.debug { "Could not find get() function on ParametersHolder class for type ${type.classFqName}" }
             return builder.irNull()
@@ -549,13 +573,15 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        val getOrNullFunction = parametersHolderClass.declarations
-            .filterIsInstance<IrSimpleFunction>()
-            .firstOrNull { function ->
-                function.name.asString() == "getOrNull" &&
-                function.typeParameters.size == 1 &&
-                function.valueParameters.isEmpty()
-            }
+        val getOrNullFunction = parameterHolderGetOrNullFunctionCache.getOrPut(parametersHolderClass) {
+            parametersHolderClass.declarations
+                .filterIsInstance<IrSimpleFunction>()
+                .firstOrNull { function ->
+                    function.name.asString() == "getOrNull" &&
+                    function.typeParameters.size == 1 &&
+                    function.valueParameters.isEmpty()
+                }
+        }
         if (getOrNullFunction == null) {
             KoinPluginLogger.debug { "Could not find getOrNull() function on ParametersHolder class for type ${type.classFqName}" }
             return builder.irNull()

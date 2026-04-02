@@ -799,6 +799,11 @@ class KoinAnnotationProcessor(
         for ((moduleClass, function) in moduleFunctions) {
             fillFunctionBody(function, moduleClass)
         }
+
+        // Memory optimization: clear cached definitions after code generation.
+        // They're no longer needed — validation phases use assembledGraphTypes (Set<String>)
+        // and getAllKnownDefinitions() which rebuilds from collectedModuleClasses if needed.
+        cachedModuleDefinitions = null
     }
 
     /**
@@ -2087,7 +2092,7 @@ class KoinAnnotationProcessor(
      * Set high enough to avoid splitting small @Configuration modules (<20 @Single methods)
      * while catching large @ComponentScan modules (25+ scanned definitions).
      */
-    private val maxDefinitionsPerMethod = 20
+    private val maxDefinitionsPerMethod = 10
 
     private fun buildModuleCall(
         moduleDslFunction: IrSimpleFunction,
