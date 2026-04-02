@@ -34,9 +34,12 @@ fun IrSimpleFunction.addDeprecatedHiddenAnnotation(context: IrPluginContext) {
 /**
  * Build an `IrConstructorCall` representing `@Deprecated(message = "...", level = DeprecationLevel.HIDDEN)`.
  * Returns null if the Deprecated class cannot be resolved.
+ *
+ * Made internal so callers can build a shared annotation instance for batch hint generation,
+ * avoiding per-function IR allocation when all hint functions need the same annotation.
  */
 @OptIn(DeprecatedForRemovalCompilerApi::class)
-private fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstructorCall? {
+internal fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstructorCall? {
     // Resolve kotlin.Deprecated class
     val deprecatedClassSymbol = context.referenceClass(StandardClassIds.Annotations.Deprecated) ?: return null
     val deprecatedClass = deprecatedClassSymbol.owner

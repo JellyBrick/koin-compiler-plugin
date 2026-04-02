@@ -840,7 +840,44 @@ class KoinAnnotationProcessor(
             return
         }
 
-        val hintFunctions = mutableListOf<IrSimpleFunction>()
+        val sourceFileEntry = moduleFragment.files.firstNotNullOfOrNull { file ->
+            try {
+                val entry = file.fileEntry
+                if (entry.name.contains("/") || entry.name.contains("\\")) entry else null
+            } catch (_: Exception) { null }
+        }
+        if (sourceFileEntry == null) {
+            KoinPluginLogger.debug { "  WARN: No valid source file entry, skipping demand hint generation" }
+            return
+        }
+
+        // Streaming optimization: create the IrFile FIRST, then stream each demand hint
+        // function directly into it as it's created. This avoids accumulating all hint
+        // functions in an intermediate list, letting each function's creation IR be eligible
+        // for GC immediately after registration.
+        val batchFileName = "koin_demand_hints.kt"
+        val firFile = buildFile {
+            moduleData = firModuleData
+            origin = FirDeclarationOrigin.Synthetic.PluginFile
+            packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+            name = batchFileName
+        }
+
+        val fakeNewPath = Path(sourceFileEntry.name).parent.resolve(batchFileName)
+        val hintFile = IrFileImpl(
+            fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
+            packageFragmentDescriptor = EmptyPackageFragmentDescriptor(moduleFragment.descriptor, hintsPackage),
+            module = moduleFragment
+        ).also { it.metadata = FirMetadataSource.File(firFile) }
+
+        moduleFragment.addFile(hintFile)
+
+        // Memory optimization: create shared IR objects for all demand hint functions.
+        // All demand hints have identical empty bodies and @Deprecated(HIDDEN) annotations.
+        val sharedEmptyBody = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+        val sharedDeprecatedAnnotation = buildDeprecatedHiddenAnnotation(context)
+
+        var hintCount = 0
 
         for (classId in uniqueTypes) {
             val irClassSymbol = context.referenceClass(classId) ?: continue
@@ -882,51 +919,23 @@ class KoinAnnotationProcessor(
             )
             valueParam.parent = function
             function.valueParameters = listOf(valueParam)
-            function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
-            function.addDeprecatedHiddenAnnotation(context)
+            // Reuse shared empty body and annotation across all demand hint functions
+            function.body = sharedEmptyBody
+            if (sharedDeprecatedAnnotation != null) {
+                function.annotations = function.annotations + sharedDeprecatedAnnotation
+            } else {
+                function.addDeprecatedHiddenAnnotation(context)
+            }
 
-            hintFunctions.add(function)
+            // Immediately add to IrFile — no intermediate list accumulation
+            hintFile.addChild(function)
+            function.parent = hintFile
+            context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(function)
+            hintCount++
             KoinPluginLogger.debug { "  + demand hint: ${irClass.fqNameWhenAvailable}" }
         }
 
-        if (hintFunctions.isEmpty()) return
-
-        // Create a single IrFile for all demand hints
-        val batchFileName = "koin_demand_hints.kt"
-        val firFile = buildFile {
-            moduleData = firModuleData
-            origin = FirDeclarationOrigin.Synthetic.PluginFile
-            packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-            name = batchFileName
-        }
-
-        val sourceFileEntry = moduleFragment.files.firstNotNullOfOrNull { file ->
-            try {
-                val entry = file.fileEntry
-                if (entry.name.contains("/") || entry.name.contains("\\")) entry else null
-            } catch (_: Exception) { null }
-        }
-        if (sourceFileEntry == null) {
-            KoinPluginLogger.debug { "  WARN: No valid source file entry, skipping demand hint generation" }
-            return
-        }
-
-        val fakeNewPath = Path(sourceFileEntry.name).parent.resolve(batchFileName)
-        val hintFile = IrFileImpl(
-            fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
-            packageFragmentDescriptor = EmptyPackageFragmentDescriptor(moduleFragment.descriptor, hintsPackage),
-            module = moduleFragment
-        ).also { it.metadata = FirMetadataSource.File(firFile) }
-
-        moduleFragment.addFile(hintFile)
-
-        for (func in hintFunctions) {
-            hintFile.addChild(func)
-            func.parent = hintFile
-            context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
-        }
-
-        KoinPluginLogger.debug { "  Batched ${hintFunctions.size} demand hints into $batchFileName" }
+        KoinPluginLogger.debug { "  Streamed $hintCount demand hints into $batchFileName" }
     }
 
     private fun generateModuleScanHints(
@@ -944,6 +953,12 @@ class KoinAnnotationProcessor(
 
         KoinPluginLogger.debug { "generateModuleScanHints: ${configModulesWithScan.size} @Configuration modules with @ComponentScan" }
 
+        // Memory optimization: create shared IR objects for all hint functions across all modules.
+        // All hint functions have identical empty bodies and @Deprecated(HIDDEN) annotations,
+        // so we create one instance of each and reuse them to avoid per-function IR allocation.
+        val sharedEmptyBody = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+        val sharedDeprecatedAnnotation = buildDeprecatedHiddenAnnotation(context)
+
         for (moduleClass in configModulesWithScan) {
             val definitions = moduleDefinitions[moduleClass] ?: continue
             if (definitions.isEmpty()) continue
@@ -953,52 +968,14 @@ class KoinAnnotationProcessor(
 
             KoinPluginLogger.debug { "  Module ${moduleClassId}: generating ${definitions.size} scan hints" }
 
-            // Collect all hint functions for this module, then batch them into a single IrFile
-            val hintFunctions = mutableListOf<IrSimpleFunction>()
-
-            for (definition in definitions) {
-                val defTypeStr = definitionTypeToString(definition.definitionType)
-                val targetClass = definition.returnTypeClass
-                val targetClassId = targetClass.classId ?: continue
-
-                when (definition) {
-                    is Definition.ClassDef, is Definition.ExternalFunctionDef -> {
-                        // Class definition hint: componentscan_<moduleId>_<defType>
-                        val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
-                        val func = createHintFunction(hintName, targetClass)
-                        if (func != null) hintFunctions.add(func)
-                        KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr)" }
-                    }
-                    is Definition.TopLevelFunctionDef -> {
-                        // Function definition hint: componentscanfunc_<moduleId>_<defType>
-                        val hintName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedModuleId, defTypeStr)
-                        val func = createHintFunction(hintName, targetClass)
-                        if (func != null) hintFunctions.add(func)
-                        KoinPluginLogger.debug { "    + componentscanfunc hint: ${targetClass.name} ($defTypeStr)" }
-                    }
-                    is Definition.DslDef -> continue // DSL definitions don't generate hints
-                    is Definition.FunctionDef -> {
-                        // Skip: module-internal function definitions (@Singleton fun provide...() inside @Module classes)
-                        // are NOT component-scanned. They are resolved directly from the module class, not via hints.
-                    }
-                }
-            }
-
-            if (hintFunctions.isEmpty()) continue
-
-            // Batch: create a single IrFile per module containing all hint functions
+            // Streaming optimization: create the IrFile FIRST, then add each hint function
+            // directly as it's created. This avoids accumulating all hint functions in an
+            // intermediate list, letting each function's creation IR be eligible for GC
+            // as soon as it's registered.
             val firModuleData = extractFirModuleData(moduleClass.irClass)
             if (firModuleData == null) {
                 KoinPluginLogger.debug { "    WARN: No FIR module data for ${moduleClass.irClass.name}, skipping hints" }
                 continue
-            }
-
-            val batchFileName = "koin_hints_${sanitizedModuleId}.kt"
-            val firFile = buildFile {
-                moduleData = firModuleData
-                origin = FirDeclarationOrigin.Synthetic.PluginFile
-                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-                name = batchFileName
             }
 
             val sourceFileEntry = try {
@@ -1010,6 +987,14 @@ class KoinAnnotationProcessor(
             if (sourceFileEntry == null) {
                 KoinPluginLogger.debug { "    WARN: No file entry for ${moduleClass.irClass.name}, skipping hints" }
                 continue
+            }
+
+            val batchFileName = "koin_hints_${sanitizedModuleId}.kt"
+            val firFile = buildFile {
+                moduleData = firModuleData
+                origin = FirDeclarationOrigin.Synthetic.PluginFile
+                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+                name = batchFileName
             }
 
             val fakeNewPath = Path(sourceFileEntry.name).parent.resolve(batchFileName)
@@ -1024,23 +1009,72 @@ class KoinAnnotationProcessor(
 
             moduleFragment.addFile(hintFile)
 
-            for (func in hintFunctions) {
-                hintFile.addChild(func)
-                func.parent = hintFile
-                context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
+            // Stream each hint function directly into the IrFile as it's created
+            var hintCount = 0
+
+            for (definition in definitions) {
+                val defTypeStr = definitionTypeToString(definition.definitionType)
+                val targetClass = definition.returnTypeClass
+                val targetClassId = targetClass.classId ?: continue
+
+                val func: IrSimpleFunction? = when (definition) {
+                    is Definition.ClassDef, is Definition.ExternalFunctionDef -> {
+                        // Class definition hint: componentscan_<moduleId>_<defType>
+                        val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
+                        KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr)" }
+                        createHintFunction(hintName, targetClass, sharedEmptyBody, sharedDeprecatedAnnotation)
+                    }
+                    is Definition.TopLevelFunctionDef -> {
+                        // Function definition hint: componentscanfunc_<moduleId>_<defType>
+                        val hintName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedModuleId, defTypeStr)
+                        KoinPluginLogger.debug { "    + componentscanfunc hint: ${targetClass.name} ($defTypeStr)" }
+                        createHintFunction(hintName, targetClass, sharedEmptyBody, sharedDeprecatedAnnotation)
+                    }
+                    is Definition.DslDef -> null // DSL definitions don't generate hints
+                    is Definition.FunctionDef -> {
+                        // Skip: module-internal function definitions (@Singleton fun provide...() inside @Module classes)
+                        // are NOT component-scanned. They are resolved directly from the module class, not via hints.
+                        null
+                    }
+                }
+
+                if (func != null) {
+                    // Immediately add to IrFile — no intermediate list accumulation
+                    hintFile.addChild(func)
+                    func.parent = hintFile
+                    context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
+                    hintCount++
+                }
             }
 
-            KoinPluginLogger.debug { "    Batched ${hintFunctions.size} hints into single file: $batchFileName" }
+            if (hintCount == 0) {
+                // No hints generated — remove the empty file
+                // (moduleFragment.files is mutable, but removing is expensive; leave empty file as-is)
+                KoinPluginLogger.debug { "    No hints generated for ${moduleClass.irClass.name}" }
+            } else {
+                KoinPluginLogger.debug { "    Streamed $hintCount hints into single file: $batchFileName" }
+            }
         }
     }
 
     /**
      * Create a hint function (without adding to any file).
      * Returns null if the target class type cannot be resolved.
+     *
+     * Memory optimization: accepts a shared empty [IrBlockBody] and a shared
+     * [IrConstructorCall] for the @Deprecated(HIDDEN) annotation. Since hint functions
+     * are never called at runtime and their bodies/annotations are structurally identical,
+     * sharing these IR nodes across all hint functions in the same batch avoids creating
+     * hundreds of duplicate IR objects.
+     *
+     * @param sharedEmptyBody A single empty IrBlockBody reused across all hint functions
+     * @param sharedDeprecatedAnnotation A single @Deprecated(HIDDEN) annotation reused across all hint functions
      */
     private fun createHintFunction(
         hintName: Name,
-        targetClass: IrClass
+        targetClass: IrClass,
+        sharedEmptyBody: IrBody? = null,
+        sharedDeprecatedAnnotation: IrConstructorCall? = null
     ): IrSimpleFunction? {
         val function = context.irFactory.createSimpleFunction(
             startOffset = UNDEFINED_OFFSET,
@@ -1081,10 +1115,17 @@ class KoinAnnotationProcessor(
         function.valueParameters = listOf(valueParam)
 
         // Empty body (stub — hint functions are never called at runtime)
-        function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+        // Reuse shared instance when available to avoid creating identical empty bodies per function
+        function.body = sharedEmptyBody
+            ?: context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
 
         // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets
-        function.addDeprecatedHiddenAnnotation(context)
+        // Reuse shared annotation when available to avoid creating identical annotation IR per function
+        if (sharedDeprecatedAnnotation != null) {
+            function.annotations = function.annotations + sharedDeprecatedAnnotation
+        } else {
+            function.addDeprecatedHiddenAnnotation(context)
+        }
 
         return function
     }
@@ -1915,6 +1956,14 @@ class KoinAnnotationProcessor(
         val modulesByFqName = getModulesByFqName()
         var allComplete = true
 
+        // Memory optimization: pre-allocate a FqName set for deduplication across all sources.
+        // Without this, definitions from multiple included modules and siblings could overlap,
+        // causing downstream consumers to process duplicates.
+        val seenFqNames = HashSet<FqName>(ownDefinitions.size * 2)
+        for (def in ownDefinitions) {
+            def.returnTypeClass.fqNameWhenAvailable?.let { seenFqNames.add(it) }
+        }
+
         val definitions = buildList {
             addAll(ownDefinitions)
 
@@ -1922,13 +1971,24 @@ class KoinAnnotationProcessor(
             for (included in moduleClass.includedModules) {
                 val includedModule = modulesByFqName[included.fqNameWhenAvailable?.asString()]
                 if (includedModule != null) {
-                    // Local included module
-                    addAll(allModuleDefinitions[includedModule] ?: emptyList())
+                    // Local included module — deduplicate before adding
+                    val includedDefs = allModuleDefinitions[includedModule] ?: emptyList()
+                    for (def in includedDefs) {
+                        val fqName = def.returnTypeClass.fqNameWhenAvailable
+                        if (fqName == null || seenFqNames.add(fqName)) {
+                            add(def)
+                        }
+                    }
                 } else {
                     // Cross-module included module from dependency JAR
                     val includedFqName = included.fqNameWhenAvailable?.asString() ?: continue
                     val result = collectDefinitionsFromDependencyModule(includedFqName)
-                    addAll(result.definitions)
+                    for (def in result.definitions) {
+                        val fqName = def.returnTypeClass.fqNameWhenAvailable
+                        if (fqName == null || seenFqNames.add(fqName)) {
+                            add(def)
+                        }
+                    }
                     if (!result.isComplete) allComplete = false
                 }
             }
@@ -1949,12 +2009,23 @@ class KoinAnnotationProcessor(
 
                     val sibling = modulesByFqName[siblingFqName]
                     if (sibling != null) {
-                        // Local sibling
-                        addAll(allModuleDefinitions[sibling] ?: emptyList())
+                        // Local sibling — deduplicate before adding
+                        val siblingDefs = allModuleDefinitions[sibling] ?: emptyList()
+                        for (def in siblingDefs) {
+                            val fqName = def.returnTypeClass.fqNameWhenAvailable
+                            if (fqName == null || seenFqNames.add(fqName)) {
+                                add(def)
+                            }
+                        }
                     } else {
                         // Cross-Gradle-module sibling — resolve from JAR + module scan hints
                         val result = collectDefinitionsFromDependencyModule(siblingFqName)
-                        addAll(result.definitions)
+                        for (def in result.definitions) {
+                            val fqName = def.returnTypeClass.fqNameWhenAvailable
+                            if (fqName == null || seenFqNames.add(fqName)) {
+                                add(def)
+                            }
+                        }
                         if (!result.isComplete) allComplete = false
                     }
                 }
@@ -2295,6 +2366,9 @@ class KoinAnnotationProcessor(
         }
 
         helperFn.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, helperStatements)
+        // Memory optimization: clear the intermediate statements list after it's consumed by createBlockBody.
+        // The IrBlockBody now owns the statements; the mutable list reference can be released.
+        helperStatements.clear()
         return helperFn
     }
 
