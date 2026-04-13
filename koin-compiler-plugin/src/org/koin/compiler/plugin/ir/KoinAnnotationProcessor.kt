@@ -102,9 +102,11 @@ class KoinAnnotationProcessor(
     val unresolvedDemands: List<UnresolvedDependency> get() = allUnresolvedDemands
 
     // Cache for referenceFunctions results to avoid repeated expensive lookups
+    // Inspired by @JellyBrick (PR #5 — https://github.com/InsertKoinIO/koin-compiler-plugin/pull/5)
     private val referenceFunctionsCache = mutableMapOf<CallableId, Collection<org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol>>()
 
     // Cache for configuration module discovery (A2 sibling resolution)
+    // Inspired by @JellyBrick (PR #5 — https://github.com/InsertKoinIO/koin-compiler-plugin/pull/5)
     private val configurationModulesCache = mutableMapOf<List<String>, List<IrClass>>()
 
     /** Exposed for cross-phase validation (A3: startKoin full-graph). */
@@ -297,10 +299,13 @@ class KoinAnnotationProcessor(
 
         if (definitionType != null || scopeArchetype != null) {
             val packageFqName = declaration.packageFqName ?: FqName.ROOT
-            // Combine auto-detected bindings with explicit bindings from annotation
-            val autoBindings = detectBindings(declaration)
+            // If binds is explicitly set (even empty), use only explicit bindings; otherwise auto-detect
             val explicitBindings = getExplicitBindings(declaration)
-            val bindings = (explicitBindings + autoBindings).distinctBy { it.fqNameWhenAvailable }
+            val bindings = if (explicitBindings != null) {
+                explicitBindings
+            } else {
+                detectBindings(declaration)
+            }
             val scopeClass = getScopeClass(declaration)
             val createdAtStart = getCreatedAtStart(declaration)
             // If scope archetype is present but no definition type, default to SCOPED
@@ -324,7 +329,7 @@ class KoinAnnotationProcessor(
         val returnTypeClass = (returnType.classifierOrNull?.owner as? IrClass) ?: return
 
         val packageFqName = (declaration.parent as? IrFile)?.packageFqName ?: FqName.ROOT
-        val bindings = getExplicitBindings(declaration)
+        val bindings = getExplicitBindings(declaration) ?: emptyList()
         val scopeClass = getScopeClass(declaration)
         val scopeArchetype = getScopeArchetype(declaration)
         val createdAtStart = getCreatedAtStart(declaration)
@@ -490,21 +495,24 @@ class KoinAnnotationProcessor(
     }
 
     /**
-     * Get explicit bindings from @Single(binds = [...]) or @Factory(binds = [...])
+     * Result of checking the explicit `binds` parameter on a definition annotation.
+     * - `null` means no `binds` parameter was specified -> auto-binding should apply
+     * - empty list means `binds = []` was explicitly set -> no bindings (auto-binding suppressed)
+     * - non-empty list means explicit bindings were provided
      */
-    private fun getExplicitBindings(declaration: IrDeclaration): List<IrClass> {
+    private fun getExplicitBindings(declaration: IrDeclaration): List<IrClass>? {
         val definitionAnnotations = listOf(KoinAnnotationFqNames.SINGLETON, KoinAnnotationFqNames.SINGLE, KoinAnnotationFqNames.FACTORY, KoinAnnotationFqNames.SCOPED, KoinAnnotationFqNames.KOIN_VIEW_MODEL, KoinAnnotationFqNames.KOIN_WORKER)
 
         val annotation = declaration.annotations.firstOrNull { annotation ->
             definitionAnnotations.any { it.asString() == annotation.type.classFqName?.asString() }
-        } ?: return emptyList()
+        } ?: return null
 
         // binds: look up by name first, then fall back to positional index 0
         val bindsArg = annotation.getValueArgument(Name.identifier("binds"))
             ?: annotation.getValueArgument(0)
 
         if (bindsArg is IrVararg) {
-            return bindsArg.elements.mapNotNull { element ->
+            val bindings = bindsArg.elements.mapNotNull { element ->
                 when (element) {
                     is IrClassReference -> element.classType.classifierOrNull?.owner as? IrClass
                     else -> null
@@ -513,9 +521,12 @@ class KoinAnnotationProcessor(
                 // Filter out Unit::class which is the default value
                 it.fqNameWhenAvailable?.asString() != "kotlin.Unit"
             }
+            // If binds parameter was present but resolved to empty (binds = [] or binds = [Unit::class]),
+            // return empty list to signal "explicitly no bindings"
+            return bindings
         }
 
-        return emptyList()
+        return null // No binds parameter specified
     }
 
     /**
@@ -1553,7 +1564,8 @@ class KoinAnnotationProcessor(
                 val definitionType = parseDefinitionType(defType) ?: continue
 
                 // Extract bindings and other metadata from the class annotations
-                val bindings = detectBindings(defClass) + getExplicitBindings(defClass)
+                val explBindings = getExplicitBindings(defClass)
+                val bindings = if (explBindings != null) explBindings else detectBindings(defClass)
                 val scopeClass = getScopeClass(defClass)
                 val createdAtStart = getCreatedAtStart(defClass)
 
@@ -1858,7 +1870,8 @@ class KoinAnnotationProcessor(
 
                 val definitionType = parseDefinitionType(defType) ?: continue
 
-                val bindings = detectBindings(defClass) + getExplicitBindings(defClass)
+                val explBindings = getExplicitBindings(defClass)
+                val bindings = if (explBindings != null) explBindings else detectBindings(defClass)
                 val scopeClass = getScopeClass(defClass)
                 val createdAtStart = getCreatedAtStart(defClass)
 
@@ -1971,6 +1984,7 @@ class KoinAnnotationProcessor(
      * Includes: own definitions + included modules + @Configuration siblings (local + cross-module).
      */
     // Cached lookup map for O(1) module resolution by FQ name
+    // Inspired by @JellyBrick (PR #5 — https://github.com/InsertKoinIO/koin-compiler-plugin/pull/5)
     private var modulesByFqNameCache: Map<String?, ModuleClass>? = null
     private fun getModulesByFqName(): Map<String?, ModuleClass> {
         return modulesByFqNameCache ?: moduleClasses.associateBy { it.irClass.fqNameWhenAvailable?.asString() }.also {

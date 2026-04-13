@@ -134,7 +134,7 @@ class KoinArgumentGenerator(
                 val lazyType = paramType as? IrSimpleType
                 val typeArgument = lazyType?.arguments?.firstOrNull()?.typeOrNull
                 if (typeArgument != null) {
-                    return createScopeInjectCall(scopeReceiver, typeArgument, qualifier, builder)
+                    return createScopeInjectCall(scopeReceiver, typeArgument, paramType, qualifier, builder)
                 }
             }
 
@@ -143,7 +143,7 @@ class KoinArgumentGenerator(
                 val listType = paramType as? IrSimpleType
                 val typeArgument = listType?.arguments?.firstOrNull()?.typeOrNull
                 if (typeArgument != null) {
-                    return createScopeGetAllCall(scopeReceiver, typeArgument, builder)
+                    return createScopeGetAllCall(scopeReceiver, typeArgument, paramType, builder)
                 }
             }
         }
@@ -359,6 +359,7 @@ class KoinArgumentGenerator(
     fun createScopeGetAllCall(
         scopeReceiver: IrExpression,
         elementType: IrType,
+        returnType: IrType? = null,
         builder: DeclarationIrBuilder
     ): IrExpression {
         val scopeClass = (scopeReceiver.type.classifierOrNull?.owner as? IrClass)
@@ -378,7 +379,8 @@ class KoinArgumentGenerator(
         }
 
         if (getAllFunction != null) {
-            return builder.irCall(getAllFunction.symbol).apply {
+            val callReturnType = returnType ?: getAllFunction.returnType
+            return builder.irCall(getAllFunction.symbol, callReturnType).apply {
                 dispatchReceiver = scopeReceiver
                 putTypeArgument(0, elementType)
             }
@@ -416,7 +418,7 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        return builder.irCall(getFunction.symbol).apply {
+        return builder.irCall(getFunction.symbol, type).apply {
             dispatchReceiver = scopeReceiver
             putTypeArgument(0, type)
 
@@ -458,7 +460,7 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        return builder.irCall(getOrNullFunction.symbol).apply {
+        return builder.irCall(getOrNullFunction.symbol, type.makeNullable()).apply {
             dispatchReceiver = scopeReceiver
             putTypeArgument(0, type)
 
@@ -476,6 +478,7 @@ class KoinArgumentGenerator(
     fun createScopeInjectCall(
         scopeReceiver: IrExpression,
         type: IrType,
+        returnType: IrType? = null,
         qualifier: QualifierValue?,
         builder: DeclarationIrBuilder
     ): IrExpression {
@@ -504,7 +507,8 @@ class KoinArgumentGenerator(
             ?.filterIsInstance<IrEnumEntry>()
             ?.firstOrNull { it.name.asString() == "SYNCHRONIZED" }
 
-        return builder.irCall(injectFunction.symbol).apply {
+        val callReturnType = returnType ?: injectFunction.returnType
+        return builder.irCall(injectFunction.symbol, callReturnType).apply {
             dispatchReceiver = scopeReceiver
             putTypeArgument(0, type)
 
@@ -556,7 +560,7 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        return builder.irCall(getFunction.symbol).apply {
+        return builder.irCall(getFunction.symbol, type).apply {
             dispatchReceiver = parametersHolderReceiver
             putTypeArgument(0, type)
         }
@@ -587,7 +591,7 @@ class KoinArgumentGenerator(
             return builder.irNull()
         }
 
-        return builder.irCall(getOrNullFunction.symbol).apply {
+        return builder.irCall(getOrNullFunction.symbol, type.makeNullable()).apply {
             dispatchReceiver = parametersHolderReceiver
             putTypeArgument(0, type)
         }
