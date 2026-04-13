@@ -1034,20 +1034,29 @@ class KoinAnnotationProcessor(
             for (definition in definitions) {
                 val defTypeStr = definitionTypeToString(definition.definitionType)
                 val targetClass = definition.returnTypeClass
-                val targetClassId = targetClass.classId ?: continue
 
                 val func: IrSimpleFunction? = when (definition) {
-                    is Definition.ClassDef, is Definition.ExternalFunctionDef -> {
+                    is Definition.ClassDef -> {
                         // Class definition hint: componentscan_<moduleId>_<defType>
                         val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
-                        KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr)" }
-                        createHintFunction(hintName, targetClass, sharedEmptyBody, sharedDeprecatedAnnotation)
+                        // Extract qualifier from the local class so cross-module consumers can recover it
+                        val classQualifier = definition.qualifier ?: qualifierExtractor.extractFromClass(definition.irClass)
+                        KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }} qualifier=${classQualifier?.debugString()}" }
+                        createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, classQualifier, sharedEmptyBody, sharedDeprecatedAnnotation)
+                    }
+                    is Definition.ExternalFunctionDef -> {
+                        // External function definition hint: componentscan_<moduleId>_<defType>
+                        val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
+                        KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }}" }
+                        createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, definition.qualifier, sharedEmptyBody, sharedDeprecatedAnnotation)
                     }
                     is Definition.TopLevelFunctionDef -> {
                         // Function definition hint: componentscanfunc_<moduleId>_<defType>
                         val hintName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedModuleId, defTypeStr)
-                        KoinPluginLogger.debug { "    + componentscanfunc hint: ${targetClass.name} ($defTypeStr)" }
-                        createHintFunction(hintName, targetClass, sharedEmptyBody, sharedDeprecatedAnnotation)
+                        // Top-level functions extract qualifier from the function declaration
+                        val funcQualifier = qualifierExtractor.extractFromDeclaration(definition.irFunction)
+                        KoinPluginLogger.debug { "    + componentscanfunc hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }} qualifier=${funcQualifier?.debugString()}" }
+                        createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, funcQualifier, sharedEmptyBody, sharedDeprecatedAnnotation)
                     }
                     is Definition.DslDef -> null // DSL definitions don't generate hints
                     is Definition.FunctionDef -> {
@@ -1078,6 +1087,8 @@ class KoinAnnotationProcessor(
 
     /**
      * Create a hint function (without adding to any file).
+     * Encodes target type + optional bindings/scope as additional value parameters
+     * (binding0: I1, binding1: I2, scope: ScopeClass) for cross-module discovery.
      * Returns null if the target class type cannot be resolved.
      *
      * Memory optimization: accepts a shared empty [IrBlockBody] and a shared
@@ -1092,6 +1103,9 @@ class KoinAnnotationProcessor(
     private fun createHintFunction(
         hintName: Name,
         targetClass: IrClass,
+        bindings: List<IrClass> = emptyList(),
+        scopeClass: IrClass? = null,
+        qualifier: QualifierValue? = null,
         sharedEmptyBody: IrBody? = null,
         sharedDeprecatedAnnotation: IrConstructorCall? = null
     ): IrSimpleFunction? {
@@ -1115,8 +1129,10 @@ class KoinAnnotationProcessor(
             isFakeOverride = false
         )
 
-        // Add parameter with the target class type
-        val valueParam = context.irFactory.createValueParameter(
+        val params = mutableListOf<IrValueParameter>()
+
+        // Primary parameter: contributed target type
+        val contributedParam = context.irFactory.createValueParameter(
             startOffset = UNDEFINED_OFFSET,
             endOffset = UNDEFINED_OFFSET,
             origin = IrDeclarationOrigin.DEFINED,
@@ -1130,8 +1146,92 @@ class KoinAnnotationProcessor(
             isNoinline = false,
             isHidden = false
         )
-        valueParam.parent = function
-        function.valueParameters = listOf(valueParam)
+        contributedParam.parent = function
+        params.add(contributedParam)
+
+        // Binding parameters: binding0: I1, binding1: I2, ...
+        bindings.distinctBy { it.fqNameWhenAvailable }.forEachIndexed { index, binding ->
+            val bindingParam = context.irFactory.createValueParameter(
+                startOffset = UNDEFINED_OFFSET,
+                endOffset = UNDEFINED_OFFSET,
+                origin = IrDeclarationOrigin.DEFINED,
+                name = Name.identifier("binding$index"),
+                type = binding.defaultType,
+                isAssignable = false,
+                symbol = IrValueParameterSymbolImpl(),
+                index = params.size,
+                varargElementType = null,
+                isCrossinline = false,
+                isNoinline = false,
+                isHidden = false
+            )
+            bindingParam.parent = function
+            params.add(bindingParam)
+        }
+
+        // Scope parameter: scope: ScopeClass
+        if (scopeClass != null) {
+            val scopeParam = context.irFactory.createValueParameter(
+                startOffset = UNDEFINED_OFFSET,
+                endOffset = UNDEFINED_OFFSET,
+                origin = IrDeclarationOrigin.DEFINED,
+                name = Name.identifier("scope"),
+                type = scopeClass.defaultType,
+                isAssignable = false,
+                symbol = IrValueParameterSymbolImpl(),
+                index = params.size,
+                varargElementType = null,
+                isCrossinline = false,
+                isNoinline = false,
+                isHidden = false
+            )
+            scopeParam.parent = function
+            params.add(scopeParam)
+        }
+
+        // Qualifier metadata: encode @Named/@Qualifier so cross-module discovery can recover it
+        // even when the original meta-annotation doesn't survive in Kotlin metadata.
+        when (qualifier) {
+            is QualifierValue.StringQualifier -> {
+                val qParam = context.irFactory.createValueParameter(
+                    startOffset = UNDEFINED_OFFSET,
+                    endOffset = UNDEFINED_OFFSET,
+                    origin = IrDeclarationOrigin.DEFINED,
+                    name = Name.identifier("qualifier_${qualifier.name}"),
+                    type = context.irBuiltIns.unitType,
+                    isAssignable = false,
+                    symbol = IrValueParameterSymbolImpl(),
+                    index = params.size,
+                    varargElementType = null,
+                    isCrossinline = false,
+                    isNoinline = false,
+                    isHidden = false
+                )
+                qParam.parent = function
+                params.add(qParam)
+            }
+            is QualifierValue.TypeQualifier -> {
+                val qParam = context.irFactory.createValueParameter(
+                    startOffset = UNDEFINED_OFFSET,
+                    endOffset = UNDEFINED_OFFSET,
+                    origin = IrDeclarationOrigin.DEFINED,
+                    name = Name.identifier("qualifierType"),
+                    type = qualifier.irClass.defaultType,
+                    isAssignable = false,
+                    symbol = IrValueParameterSymbolImpl(),
+                    index = params.size,
+                    varargElementType = null,
+                    isCrossinline = false,
+                    isNoinline = false,
+                    isHidden = false
+                )
+                qParam.parent = function
+                params.add(qParam)
+            }
+            null -> {}
+        }
+
+        function.valueParameters = params
 
         // Empty body (stub — hint functions are never called at runtime)
         // Reuse shared instance when available to avoid creating identical empty bodies per function
@@ -1404,7 +1504,8 @@ class KoinAnnotationProcessor(
                 defClass.bindings,
                 defClass.scopeClass,
                 defClass.scopeArchetype,
-                defClass.createdAtStart
+                defClass.createdAtStart,
+                defClass.qualifier
             )
         })
 
@@ -1545,8 +1646,9 @@ class KoinAnnotationProcessor(
 
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
+                val params = hintFunc.valueParameters
                 // The first parameter type is the definition class
-                val paramType = hintFunc.valueParameters.firstOrNull()?.type ?: continue
+                val paramType = params.firstOrNull()?.type ?: continue
                 val defClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
 
                 // Check if the class's package matches scan packages
@@ -1563,13 +1665,43 @@ class KoinAnnotationProcessor(
                 // Convert hint type to DefinitionType
                 val definitionType = parseDefinitionType(defType) ?: continue
 
-                // Extract bindings and other metadata from the class annotations
-                val explBindings = getExplicitBindings(defClass)
-                val bindings = if (explBindings != null) explBindings else detectBindings(defClass)
-                val scopeClass = getScopeClass(defClass)
+                // Extract bindings from hint parameters (encoded by FIR as binding0, binding1, ...).
+                // This is critical for cross-module discovery — reading the IR class's supertypes
+                // directly is unreliable for `internal` classes loaded from JARs/klibs.
+                val hintBindings = params.filter { it.name.asString().startsWith("binding") }
+                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+
+                // Fallback to local detection if hint has no bindings encoded (older hints / @Inject case)
+                val bindings = if (hintBindings.isNotEmpty()) {
+                    hintBindings
+                } else {
+                    val explBindings = getExplicitBindings(defClass)
+                    if (explBindings != null) explBindings else detectBindings(defClass)
+                }
+
+                // Scope class from hint param, fallback to local class annotation
+                val scopeClass = params.firstOrNull { it.name.asString() == "scope" }
+                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+                    ?: getScopeClass(defClass)
+
+                // Qualifier from hint params (cross-module), fallback to direct extraction.
+                // Direct extraction is unreliable for `@Qualifier` meta-annotations on cross-module classes.
+                val qualifier: QualifierValue? = run {
+                    val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
+                    if (qParam != null) {
+                        QualifierValue.StringQualifier(qParam.name.asString().removePrefix("qualifier_"))
+                    } else {
+                        val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
+                        if (qTypeParam != null) {
+                            val qClass = (qTypeParam.type.classifierOrNull as? IrClassSymbol)?.owner
+                            if (qClass != null) QualifierValue.TypeQualifier(qClass) else null
+                        } else null
+                    }
+                } ?: qualifierExtractor.extractFromClass(defClass)
+
                 val createdAtStart = getCreatedAtStart(defClass)
 
-                KoinPluginLogger.debug { "    Discovered: ${defClass.name} ($defType) from package $defPackage" }
+                KoinPluginLogger.debug { "    Discovered: ${defClass.name} ($defType) from package $defPackage, bindings=${bindings.map { it.name.asString() }}, qualifier=${qualifier?.debugString()}" }
 
                 discovered.add(DefinitionClass(
                     irClass = defClass,
@@ -1578,7 +1710,8 @@ class KoinAnnotationProcessor(
                     bindings = bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass = scopeClass,
                     scopeArchetype = getScopeArchetype(defClass),
-                    createdAtStart = createdAtStart
+                    createdAtStart = createdAtStart,
+                    qualifier = qualifier
                 ))
             }
         }
@@ -1829,7 +1962,8 @@ class KoinAnnotationProcessor(
                 defClass.bindings,
                 defClass.scopeClass,
                 defClass.scopeArchetype,
-                defClass.createdAtStart
+                defClass.createdAtStart,
+                defClass.qualifier
             )
         }
     }
@@ -1861,7 +1995,8 @@ class KoinAnnotationProcessor(
 
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
-                val paramType = hintFunc.valueParameters.firstOrNull()?.type ?: continue
+                val classParams = hintFunc.valueParameters
+                val paramType = classParams.firstOrNull()?.type ?: continue
                 val defClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
 
                 // Skip duplicates using Set for O(1) lookup
@@ -1870,12 +2005,39 @@ class KoinAnnotationProcessor(
 
                 val definitionType = parseDefinitionType(defType) ?: continue
 
-                val explBindings = getExplicitBindings(defClass)
-                val bindings = if (explBindings != null) explBindings else detectBindings(defClass)
-                val scopeClass = getScopeClass(defClass)
+                // Extract bindings from hint parameters first (binding0, binding1, ...)
+                // critical for `internal` cross-module classes whose IR supertypes may not be reliably accessible.
+                val hintBindings = classParams.filter { it.name.asString().startsWith("binding") }
+                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+
+                val bindings = if (hintBindings.isNotEmpty()) {
+                    hintBindings
+                } else {
+                    val explBindings = getExplicitBindings(defClass)
+                    if (explBindings != null) explBindings else detectBindings(defClass)
+                }
+
+                val scopeClass = classParams.firstOrNull { it.name.asString() == "scope" }
+                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+                    ?: getScopeClass(defClass)
+
+                // Qualifier from hint params (cross-module), fallback to direct extraction
+                val classQualifier: QualifierValue? = run {
+                    val qParam = classParams.firstOrNull { it.name.asString().startsWith("qualifier_") }
+                    if (qParam != null) {
+                        QualifierValue.StringQualifier(qParam.name.asString().removePrefix("qualifier_"))
+                    } else {
+                        val qTypeParam = classParams.firstOrNull { it.name.asString() == "qualifierType" }
+                        if (qTypeParam != null) {
+                            val qClass = (qTypeParam.type.classifierOrNull as? IrClassSymbol)?.owner
+                            if (qClass != null) QualifierValue.TypeQualifier(qClass) else null
+                        } else null
+                    }
+                } ?: qualifierExtractor.extractFromClass(defClass)
+
                 val createdAtStart = getCreatedAtStart(defClass)
 
-                KoinPluginLogger.debug { "        Found: ${defClass.name} ($defType) via module-scan hint" }
+                KoinPluginLogger.debug { "        Found: ${defClass.name} ($defType) via module-scan hint, bindings=${bindings.map { it.name.asString() }}, qualifier=${classQualifier?.debugString()}" }
 
                 definitions.add(Definition.ClassDef(
                     defClass,
@@ -1883,7 +2045,8 @@ class KoinAnnotationProcessor(
                     bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass,
                     getScopeArchetype(defClass),
-                    createdAtStart
+                    createdAtStart,
+                    classQualifier
                 ))
             }
 
