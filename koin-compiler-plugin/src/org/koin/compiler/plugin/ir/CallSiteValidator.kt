@@ -40,6 +40,40 @@ class CallSiteValidator(private val context: IrPluginContext) {
         }
     }
 
+    // Phases 3.4 / 3.6 / 3.7 each rebuilt the same set of "all known FqName strings" from
+    // (assembledGraphTypes + dslHintTypes + dslDefinitions + bindings + annotation definitions
+    //  + bindings). The two list-derived components dominate — large compilations have hundreds
+    // of definitions, each requiring `fqNameWhenAvailable?.asString()` per binding. The same
+    // List<Definition> and the same KoinAnnotationProcessor flow through all three phases
+    // (see [KoinIrExtension]), so we memoize each component by reference identity. If the
+    // caller passes a different list/processor (defensive), the cache misses and rebuilds.
+    private var cachedDslDefinitionFqNames: Pair<List<Definition>, Set<String>>? = null
+    private var cachedAnnotationDefinitionFqNames: Pair<KoinAnnotationProcessor, Set<String>>? = null
+
+    private fun dslDefinitionFqNames(dslDefinitions: List<Definition>): Set<String> {
+        cachedDslDefinitionFqNames?.let { if (it.first === dslDefinitions) return it.second }
+        val set = buildSet<String> {
+            for (def in dslDefinitions) {
+                def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
+                for (b in def.bindings) b.fqNameWhenAvailable?.asString()?.let { add(it) }
+            }
+        }
+        cachedDslDefinitionFqNames = dslDefinitions to set
+        return set
+    }
+
+    private fun annotationDefinitionFqNames(processor: KoinAnnotationProcessor): Set<String> {
+        cachedAnnotationDefinitionFqNames?.let { if (it.first === processor) return it.second }
+        val set = buildSet<String> {
+            for (def in processor.getAllKnownDefinitions()) {
+                def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
+                for (b in def.bindings) b.fqNameWhenAvailable?.asString()?.let { add(it) }
+            }
+        }
+        cachedAnnotationDefinitionFqNames = processor to set
+        return set
+    }
+
     /**
      * A4: Validate pending call-site resolutions against the assembled graph.
      * Simple loop -- no tree walk needed.
@@ -66,22 +100,17 @@ class CallSiteValidator(private val context: IrPluginContext) {
         // `startKoin<MyApp>() { modules(dslModule) }` where dslModule lives in another source set).
         val dslHintTypes = dslHintGenerator.discoverDslDefinitionTypes()
 
-        // Build the set of all known provided types
+        // Build the set of all known provided types. Reference-identity-memoized: the same
+        // dslDefinitions / annotationProcessor pass through Phase 3.4 / 3.6 / 3.7, so the
+        // FqName-string extraction (the loop-heavy part) is paid at most once per compile.
         val allKnownTypes = buildSet {
             addAll(assembledGraphTypes)
             addAll(dslHintTypes)
-            // Add DSL definition types + bindings
-            for (def in dslDefinitions) {
-                def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
-                for (b in def.bindings) { b.fqNameWhenAvailable?.asString()?.let { add(it) } }
-            }
+            addAll(dslDefinitionFqNames(dslDefinitions))
             // When no startKoin/koinConfiguration in this compilation unit,
             // fall back to annotation definitions as known types
             if (!hasFullGraph && annotationProcessor != null) {
-                for (def in annotationProcessor.getAllKnownDefinitions()) {
-                    def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
-                    for (b in def.bindings) { b.fqNameWhenAvailable?.asString()?.let { add(it) } }
-                }
+                addAll(annotationDefinitionFqNames(annotationProcessor))
             }
         }
 
@@ -301,22 +330,13 @@ class CallSiteValidator(private val context: IrPluginContext) {
         val hintFunctions = cachedReferenceFunctions(CallableId(hintsPackage, hintFunctionName))
         if (hintFunctions.isEmpty()) return
 
-        // Build the set of all known provided types
+        // Same shape as Phase 3.4 above — memoized helpers reuse the FqName extraction across phases.
         val allKnownTypes = buildSet {
             addAll(assembledGraphTypes)
-            // Add local DSL definitions
-            for (def in dslDefinitions) {
-                def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
-                for (b in def.bindings) { b.fqNameWhenAvailable?.asString()?.let { add(it) } }
-            }
-            // Add DSL definition hints from dependencies
+            addAll(dslDefinitionFqNames(dslDefinitions))
             addAll(dslHintGenerator.discoverDslDefinitionTypes())
-            // Add annotation definitions
             if (annotationProcessor != null) {
-                for (def in annotationProcessor.getAllKnownDefinitions()) {
-                    def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
-                    for (b in def.bindings) { b.fqNameWhenAvailable?.asString()?.let { add(it) } }
-                }
+                addAll(annotationDefinitionFqNames(annotationProcessor))
             }
         }
 
@@ -383,30 +403,14 @@ class CallSiteValidator(private val context: IrPluginContext) {
             return
         }
 
-        KoinPluginLogger.debug { "Phase 3.7: Found ${hintFunctions.toList().size} demand hints from dependencies" }
+        KoinPluginLogger.debug { "Phase 3.7: Found ${hintFunctions.size} demand hints from dependencies" }
 
-        // Build the complete set of known types
+        // Same shape as Phase 3.4 / 3.6 — memoized helpers avoid rebuilding FqName extractions.
         val allKnownTypes = buildSet {
             addAll(assembledGraphTypes)
-
-            // Add DSL definition types
-            for (dslDef in dslDefinitions) {
-                dslDef.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
-                for (binding in dslDef.bindings) {
-                    binding.fqNameWhenAvailable?.asString()?.let { add(it) }
-                }
-            }
-
-            // Add DSL hints from dependencies
+            addAll(dslDefinitionFqNames(dslDefinitions))
             addAll(dslHintGenerator.discoverDslDefinitionTypes())
-
-            // Add annotation definitions
-            for (def in annotationProcessor.getAllKnownDefinitions()) {
-                def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { add(it) }
-                for (binding in def.bindings) {
-                    binding.fqNameWhenAvailable?.asString()?.let { add(it) }
-                }
-            }
+            addAll(annotationDefinitionFqNames(annotationProcessor))
         }
 
         KoinPluginLogger.debug { "Phase 3.7: ${allKnownTypes.size} known types in assembled graph" }

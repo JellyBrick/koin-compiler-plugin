@@ -124,6 +124,162 @@ class KoinAnnotationProcessor(
         definitionTopLevelFunctions.groupBy { it.packageFqName.asString() }
     }
 
+    /**
+     * Pre-extracted summary of one cross-module `definition_<defType>` hint function.
+     *
+     * Everything we need from a hint to construct a [DefinitionClass] — except the per-caller
+     * scan-package check — is invariant across compile, so we walk each hint function's
+     * parameters exactly once instead of repeating the walk per `@Module + @ComponentScan`.
+     */
+    private data class ExtractedDefHint(
+        val defType: String,
+        val definitionType: DefinitionType,
+        val defClass: IrClass,
+        val defPackage: String,
+        val defFqName: String?,
+        val hintBindings: List<IrClass>,
+        val hintScopeClass: IrClass?,
+        val hintQualifier: QualifierValue?,
+    )
+
+    /**
+     * Pre-extracted summary of one cross-module `definition_function_<defType>` hint function.
+     *
+     * Function hints carry an optional `funcpkg_*` parameter encoding the function's own package
+     * (when it differs from the return type's package), so scan-package matching has to check
+     * both. [scanCandidatePackages] enumerates the union once at extraction time.
+     */
+    private data class ExtractedFuncHint(
+        val defType: String,
+        val definitionType: DefinitionType,
+        val returnTypeClass: IrClass,
+        val returnTypePackage: String,
+        val returnTypeFqName: FqName?,
+        val scanCandidatePackages: Set<String>,
+        val bindings: List<IrClass>,
+        val scopeClass: IrClass?,
+        val qualifier: QualifierValue?,
+    )
+
+    /**
+     * Cross-module class hints (`definition_<defType>`), pre-extracted once per compile and
+     * grouped by the providing class's package. Lookup is then
+     * O(distinct-hint-packages × scan-packages) instead of O(total-hints × scan-packages) per
+     * `@Module + @ComponentScan` — see [discoverDefinitionsFromHints].
+     */
+    private val extractedDefHintsByPackage: Map<String, List<ExtractedDefHint>> by lazy {
+        val byPackage = mutableMapOf<String, MutableList<ExtractedDefHint>>()
+        for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
+            val definitionType = parseDefinitionType(defType) ?: continue
+            val functionName = KoinModuleFirGenerator.definitionHintFunctionName(defType)
+            val hintFunctions = cachedReferenceFunctions(
+                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, functionName)
+            )
+            for (hintFuncSymbol in hintFunctions) {
+                val hintFunc = hintFuncSymbol.owner
+                val params = hintFunc.valueParameters
+                val paramType = params.firstOrNull()?.type ?: continue
+                val defClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
+                val defPackage = defClass.packageFqName?.asString() ?: continue
+
+                val hintBindings = params.filter { it.name.asString().startsWith("binding") }
+                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+                val hintScopeClass = params.firstOrNull { it.name.asString() == "scope" }
+                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+                val hintQualifier: QualifierValue? = run {
+                    val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
+                    if (qParam != null) {
+                        QualifierValue.StringQualifier(
+                            KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_"))
+                        )
+                    } else {
+                        val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
+                        (qTypeParam?.type?.classifierOrNull as? IrClassSymbol)?.owner
+                            ?.let { QualifierValue.TypeQualifier(it) }
+                    }
+                }
+
+                byPackage.getOrPut(defPackage) { mutableListOf() }.add(
+                    ExtractedDefHint(
+                        defType = defType,
+                        definitionType = definitionType,
+                        defClass = defClass,
+                        defPackage = defPackage,
+                        defFqName = defClass.fqNameWhenAvailable?.asString(),
+                        hintBindings = hintBindings,
+                        hintScopeClass = hintScopeClass,
+                        hintQualifier = hintQualifier,
+                    )
+                )
+            }
+        }
+        byPackage
+    }
+
+    /**
+     * Cross-module function hints (`definition_function_<defType>`), pre-extracted once per
+     * compile. A flat list because each hint can match scan packages via either its return-type
+     * package OR its declared `funcpkg_` package — indexing by either alone would miss matches.
+     * Still saves the per-`@Module` param-walk + classifier-lookup + qualifier-decode cost.
+     */
+    private val extractedFuncHints: List<ExtractedFuncHint> by lazy {
+        val list = mutableListOf<ExtractedFuncHint>()
+        for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
+            val definitionType = parseDefinitionType(defType) ?: continue
+            val functionName = KoinModuleFirGenerator.definitionFunctionHintFunctionName(defType)
+            val hintFunctions = cachedReferenceFunctions(
+                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, functionName)
+            )
+            for (hintFuncSymbol in hintFunctions) {
+                val hintFunc = hintFuncSymbol.owner
+                val params = hintFunc.valueParameters
+                val paramType = params.firstOrNull()?.type ?: continue
+                val returnTypeClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
+                val returnTypePackage = returnTypeClass.packageFqName?.asString() ?: continue
+
+                val funcPkgParam = params.firstOrNull { it.name.asString().startsWith("funcpkg_") }
+                val functionPackage = funcPkgParam?.name?.asString()?.removePrefix("funcpkg_")?.replace("_", ".")
+
+                val bindings = params.filter { it.name.asString().startsWith("binding") }
+                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+                val scopeClass = params.firstOrNull { it.name.asString() == "scope" }
+                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+                val qualifier: QualifierValue? = run {
+                    val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
+                    if (qParam != null) {
+                        QualifierValue.StringQualifier(
+                            KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_"))
+                        )
+                    } else {
+                        val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
+                        (qTypeParam?.type?.classifierOrNull as? IrClassSymbol)?.owner
+                            ?.let { QualifierValue.TypeQualifier(it) }
+                    }
+                }
+
+                val candidates = if (functionPackage != null && functionPackage != returnTypePackage)
+                    setOf(returnTypePackage, functionPackage)
+                else
+                    setOf(returnTypePackage)
+
+                list.add(
+                    ExtractedFuncHint(
+                        defType = defType,
+                        definitionType = definitionType,
+                        returnTypeClass = returnTypeClass,
+                        returnTypePackage = returnTypePackage,
+                        returnTypeFqName = returnTypeClass.fqNameWhenAvailable,
+                        scanCandidatePackages = candidates,
+                        bindings = bindings,
+                        scopeClass = scopeClass,
+                        qualifier = qualifier,
+                    )
+                )
+            }
+        }
+        list
+    }
+
     /** Exposed for cross-phase validation (A3: startKoin full-graph). */
     val collectedModuleClasses: List<ModuleClass> get() = moduleClasses
 
@@ -1059,8 +1215,10 @@ class KoinAnnotationProcessor(
         val modulesWithScan = moduleClasses.filter { it.hasComponentScan }
         if (modulesWithScan.isEmpty()) return
 
-        val configCount = modulesWithScan.count { hasConfigurationAnnotation(it.irClass) }
         KoinPluginLogger.debug {
+            // hasConfigurationAnnotation walks each module's annotation list — only worth doing
+            // when debug logging is on, so the count is computed inside the lazy lambda.
+            val configCount = modulesWithScan.count { hasConfigurationAnnotation(it.irClass) }
             "generateModuleScanHints: ${modulesWithScan.size} @Module modules with @ComponentScan (config=$configCount)"
         }
 
@@ -1833,89 +1991,51 @@ class KoinAnnotationProcessor(
      * Used for cross-module @ComponentScan - discovers @KoinViewModel, @Singleton, etc. from other Gradle modules.
      */
     private fun discoverDefinitionsFromHints(scanPackages: List<String>): List<DefinitionClass> {
+        // Per-package iteration over the pre-extracted index: we only pay the param walk +
+        // classifier lookup + qualifier decode for each hint function ONCE per compile (see
+        // `extractedDefHintsByPackage`), even though this method is called per @Module.
         val discovered = mutableListOf<DefinitionClass>()
-
-        // Query each definition type
-        for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
-            val functionName = KoinModuleFirGenerator.definitionHintFunctionName(defType)
-            val hintFunctions = cachedReferenceFunctions(
-                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, functionName)
-            )
-
-            KoinPluginLogger.debug { "  Querying hints: $functionName -> ${hintFunctions.count()} functions" }
-
-            for (hintFuncSymbol in hintFunctions) {
-                val hintFunc = hintFuncSymbol.owner
-                val params = hintFunc.valueParameters
-                // The first parameter type is the definition class
-                val paramType = params.firstOrNull()?.type ?: continue
-                val defClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
-
-                // Check if the class's package matches scan packages
-                val defPackage = defClass.packageFqName?.asString() ?: continue
-                if (!matchesScanPackages(defPackage, scanPackages)) continue
-
+        for ((pkg, hints) in extractedDefHintsByPackage) {
+            if (!matchesScanPackages(pkg, scanPackages)) continue
+            for (h in hints) {
                 // Skip if we already have this class in local definitions (O(1) Set lookup)
-                if (defClass.fqNameWhenAvailable?.asString() in localDefinitionFqNames) {
-                    KoinPluginLogger.debug { "    Skipping ${defClass.name} - already in local definitions" }
+                if (h.defFqName != null && h.defFqName in localDefinitionFqNames) {
+                    KoinPluginLogger.debug { "    Skipping ${h.defClass.name} - already in local definitions" }
                     continue
                 }
 
-                // Convert hint type to DefinitionType
-                val definitionType = parseDefinitionType(defType) ?: continue
-
-                // Extract bindings from hint parameters (encoded by FIR as binding0, binding1, ...).
-                // This is critical for cross-module discovery — reading the IR class's supertypes
-                // directly is unreliable for `internal` classes loaded from JARs/klibs.
-                val hintBindings = params.filter { it.name.asString().startsWith("binding") }
-                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-
-                // Fallback to local detection if hint has no bindings encoded (older hints / @Inject case)
-                val bindings = if (hintBindings.isNotEmpty()) {
-                    hintBindings
+                // Bindings: prefer hint-encoded list (reliable across module boundaries),
+                // fall back to local detection if the hint doesn't carry bindings (older hints
+                // or `@Inject`-discovered classes).
+                val bindings = if (h.hintBindings.isNotEmpty()) {
+                    h.hintBindings
                 } else {
-                    val explBindings = getExplicitBindings(defClass)
-                    if (explBindings != null) explBindings else detectBindings(defClass)
+                    getExplicitBindings(h.defClass) ?: detectBindings(h.defClass)
                 }
-
-                // Scope class from hint param, fallback to local class annotation
-                val scopeClass = params.firstOrNull { it.name.asString() == "scope" }
-                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                    ?: getScopeClass(defClass)
-
+                val scopeClass = h.hintScopeClass ?: getScopeClass(h.defClass)
                 // Qualifier from hint params (cross-module), fallback to direct extraction.
                 // Direct extraction is unreliable for `@Qualifier` meta-annotations on cross-module classes.
-                val qualifier: QualifierValue? = run {
-                    val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
-                    if (qParam != null) {
-                        QualifierValue.StringQualifier(KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_")))
-                    } else {
-                        val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
-                        if (qTypeParam != null) {
-                            val qClass = (qTypeParam.type.classifierOrNull as? IrClassSymbol)?.owner
-                            if (qClass != null) QualifierValue.TypeQualifier(qClass) else null
-                        } else null
-                    }
-                } ?: qualifierExtractor.extractFromClass(defClass)
+                val qualifier = h.hintQualifier ?: qualifierExtractor.extractFromClass(h.defClass)
+                val createdAtStart = getCreatedAtStart(h.defClass)
 
-                val createdAtStart = getCreatedAtStart(defClass)
-
-                KoinPluginLogger.debug { "    Discovered: ${defClass.name} ($defType) from package $defPackage, bindings=${bindings.map { it.name.asString() }}, qualifier=${qualifier?.debugString()}" }
+                KoinPluginLogger.debug {
+                    "    Discovered: ${h.defClass.name} (${h.defType}) from package ${h.defPackage}, " +
+                        "bindings=${bindings.map { it.name.asString() }}, qualifier=${qualifier?.debugString()}"
+                }
 
                 discovered.add(DefinitionClass(
-                    irClass = defClass,
-                    definitionType = definitionType,
-                    packageFqName = FqName(defPackage),
+                    irClass = h.defClass,
+                    definitionType = h.definitionType,
+                    packageFqName = FqName(h.defPackage),
                     bindings = bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass = scopeClass,
-                    scopeName = getScopeName(defClass),
-                    scopeArchetype = getScopeArchetype(defClass),
+                    scopeName = getScopeName(h.defClass),
+                    scopeArchetype = getScopeArchetype(h.defClass),
                     createdAtStart = createdAtStart,
                     qualifier = qualifier
                 ))
             }
         }
-
         return discovered
     }
 
@@ -1930,85 +2050,42 @@ class KoinAnnotationProcessor(
      * when the function lives in package `infra` but returns a type from package `domain`.
      */
     private fun discoverFunctionDefinitionsFromHints(scanPackages: List<String>): List<Definition.ExternalFunctionDef> {
-        val discovered = mutableListOf<Definition.ExternalFunctionDef>()
-
-        // Pre-build Set of known function def FqNames for O(1) duplicate checking
+        // Pre-build Set of known function-def FqNames for O(1) duplicate checking. (Cheap to
+        // recompute per call — `definitionTopLevelFunctions` is the local list, which is small
+        // relative to the cross-module hint count.)
         val knownFuncDefFqNames = buildSet<FqName> {
             for (funcDef in definitionTopLevelFunctions) {
                 funcDef.returnTypeClass.fqNameWhenAvailable?.let { add(it) }
             }
         }
 
-        for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
-            val functionName = KoinModuleFirGenerator.definitionFunctionHintFunctionName(defType)
-            val hintFunctions = cachedReferenceFunctions(
-                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, functionName)
-            )
+        // Walk the pre-extracted hint list. Each hint has its scan-candidate packages already
+        // computed (return-type package + optional funcpkg_*), so we just need a `.any { }` over
+        // a typically-tiny set. The param walk / classifier lookup / qualifier decode was paid
+        // once when [extractedFuncHints] was lazily built.
+        val discovered = mutableListOf<Definition.ExternalFunctionDef>()
+        for (h in extractedFuncHints) {
+            val anyMatch = h.scanCandidatePackages.any { matchesScanPackages(it, scanPackages) }
+            if (!anyMatch) continue
 
-            KoinPluginLogger.debug { "  Querying function hints: $functionName -> ${hintFunctions.count()} functions" }
-
-            for (hintFuncSymbol in hintFunctions) {
-                val hintFunc = hintFuncSymbol.owner
-                val params = hintFunc.valueParameters
-                // The first parameter type is the return type of the original function (what it provides)
-                val paramType = params.firstOrNull()?.type ?: continue
-                val returnTypeClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
-
-                // Extract function's own package from funcpkg_<package> parameter (encoded when it differs from return type)
-                val funcPkgParam = params.firstOrNull { it.name.asString().startsWith("funcpkg_") }
-                val functionPackage = funcPkgParam?.name?.asString()?.removePrefix("funcpkg_")?.replace("_", ".")
-
-                // Check if either the return type's package or the function's own package matches scan packages
-                val defPackage = returnTypeClass.packageFqName?.asString() ?: continue
-                val matchesReturnTypePackage = matchesScanPackages(defPackage, scanPackages)
-                val matchesFunctionPackage = functionPackage != null && matchesScanPackages(functionPackage, scanPackages)
-                if (!matchesReturnTypePackage && !matchesFunctionPackage) continue
-
-                // Skip if we already have this type in local top-level function definitions (O(1) Set lookup)
-                val funcFqName = returnTypeClass.fqNameWhenAvailable
-                if (funcFqName != null && funcFqName in knownFuncDefFqNames) {
-                    KoinPluginLogger.debug { "    Skipping ${returnTypeClass.name} - already in local function definitions" }
-                    continue
-                }
-
-                val definitionType = parseDefinitionType(defType) ?: continue
-
-                // Extract enriched metadata from hint parameters (C2: cross-module function hint metadata)
-                val bindings = params.filter { it.name.asString().startsWith("binding") }
-                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-
-                val scopeClass = params.firstOrNull { it.name.asString() == "scope" }
-                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-
-                val qualifier: QualifierValue? = run {
-                    val qualifierParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
-                    if (qualifierParam != null) {
-                        val name = KoinPluginConstants.unsanitizeQualifierName(qualifierParam.name.asString().removePrefix("qualifier_"))
-                        QualifierValue.StringQualifier(name)
-                    } else {
-                        val qualTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
-                        if (qualTypeParam != null) {
-                            val qualClass = (qualTypeParam.type.classifierOrNull as? IrClassSymbol)?.owner
-                            if (qualClass != null) QualifierValue.TypeQualifier(qualClass) else null
-                        } else null
-                    }
-                }
-
-                KoinPluginLogger.debug { "    Discovered function def: ${returnTypeClass.name} ($defType) from package $defPackage" }
-                if (bindings.isNotEmpty()) KoinPluginLogger.debug { "      bindings: ${bindings.map { it.name }}" }
-                if (scopeClass != null) KoinPluginLogger.debug { "      scope: ${scopeClass.fqNameWhenAvailable}" }
-                if (qualifier != null) KoinPluginLogger.debug { "      qualifier: ${qualifier.debugString()}" }
-
-                discovered.add(Definition.ExternalFunctionDef(
-                    definitionType = definitionType,
-                    returnTypeClass = returnTypeClass,
-                    bindings = bindings,
-                    scopeClass = scopeClass,
-                    qualifier = qualifier
-                ))
+            if (h.returnTypeFqName != null && h.returnTypeFqName in knownFuncDefFqNames) {
+                KoinPluginLogger.debug { "    Skipping ${h.returnTypeClass.name} - already in local function definitions" }
+                continue
             }
-        }
 
+            KoinPluginLogger.debug { "    Discovered function def: ${h.returnTypeClass.name} (${h.defType}) from package ${h.returnTypePackage}" }
+            if (h.bindings.isNotEmpty()) KoinPluginLogger.debug { "      bindings: ${h.bindings.map { it.name }}" }
+            if (h.scopeClass != null) KoinPluginLogger.debug { "      scope: ${h.scopeClass.fqNameWhenAvailable}" }
+            if (h.qualifier != null) KoinPluginLogger.debug { "      qualifier: ${h.qualifier.debugString()}" }
+
+            discovered.add(Definition.ExternalFunctionDef(
+                definitionType = h.definitionType,
+                returnTypeClass = h.returnTypeClass,
+                bindings = h.bindings,
+                scopeClass = h.scopeClass,
+                qualifier = h.qualifier
+            ))
+        }
         return discovered
     }
 
