@@ -127,6 +127,26 @@ object KoinPluginConstants {
     /** Function name for qualifier annotation hint functions (e.g., qualifier). */
     const val QUALIFIER_HINT_NAME = "qualifier"
 
+    /**
+     * Maximum number of hint functions emitted into a single synthetic `.class` file before
+     * rolling over into `_partN`. The JVM constant pool is u2 (max 65 535 entries) and each
+     * hint function consumes ~10–20 entries for its name, target type, optional binding/scope
+     * params, qualifier metadata, and `@Deprecated(HIDDEN)` annotation. In hexagonal codebases
+     * with O(100) `@Factory`/`@Single` per `@ComponentScan` module the cumulative class file
+     * size has been observed at 7 MB+, which trips ASM `ClassReader.readAttribute` with
+     * `ArrayIndexOutOfBoundsException` at the Gradle classpath-snapshot transform.
+     *
+     * 50 keeps each part well under the constant-pool ceiling and the per-attribute u4 length
+     * limits while still amortizing file overhead. Adjust if you observe either:
+     *   - small modules paying too much per-part overhead → raise
+     *   - large modules still tripping ASM → lower
+     *
+     * The first part keeps the unsuffixed file name (`koin_hints_<moduleId>.kt`) so existing
+     * golden test data and stable hint-file anchors (issue #32) are unaffected for any module
+     * that fits below the threshold.
+     */
+    const val MAX_HINTS_PER_FILE = 50
+
     /** Function name for call-site hints (deferred validation across modules). */
     const val CALLSITE_HINT_NAME = "callsite"
 

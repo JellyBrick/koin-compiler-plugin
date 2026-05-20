@@ -939,28 +939,41 @@ class KoinAnnotationProcessor(
             return
         }
 
-        // Streaming optimization: create the IrFile FIRST, then stream each demand hint
-        // function directly into it as it's created. This avoids accumulating all hint
-        // functions in an intermediate list, letting each function's creation IR be eligible
-        // for GC immediately after registration.
-        val batchFileName = "koin_demand_hints.kt"
-        val firFile = buildFile {
-            moduleData = firModuleData
-            origin = FirDeclarationOrigin.Synthetic.PluginFile
-            packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-            name = batchFileName
-        }
-
-        val fakeNewPath = Path(sourceFileEntry.name).parent.resolve(batchFileName)
-        val hintFile = IrFileImpl(
-            fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
-            packageFragmentDescriptor = EmptyPackageFragmentDescriptor(moduleFragment.descriptor, hintsPackage),
-            module = moduleFragment
-        ).also { it.metadata = FirMetadataSource.File(firFile) }
-
-        moduleFragment.addFile(hintFile)
-
+        // Streaming optimization: each demand hint function streams directly into its IrFile
+        // as it's created, no intermediate accumulator. Same multi-part safeguard as
+        // `generateModuleScanHints` — see [KoinPluginConstants.MAX_HINTS_PER_FILE] for why.
+        // The first part keeps the unsuffixed `koin_demand_hints.kt` name so single-file
+        // demand-hint output stays byte-identical to the pre-split behavior.
+        var currentPartIndex = 0
+        var currentHintFile: IrFile? = null
+        var currentHintCount = 0
         var hintCount = 0
+        val createdPartFileNames = mutableListOf<String>()
+        val sourceParentPath = Path(sourceFileEntry.name).parent
+
+        fun openNextDemandPart() {
+            val partFileName = if (currentPartIndex == 0)
+                "koin_demand_hints.kt"
+            else
+                "koin_demand_hints_part${currentPartIndex}.kt"
+
+            val partFirFile = buildFile {
+                moduleData = firModuleData
+                origin = FirDeclarationOrigin.Synthetic.PluginFile
+                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+                name = partFileName
+            }
+            val partFakePath = sourceParentPath.resolve(partFileName)
+            val partHintFile = IrFileImpl(
+                fileEntry = NaiveSourceBasedFileEntryImpl(partFakePath.absolutePathString()),
+                packageFragmentDescriptor = EmptyPackageFragmentDescriptor(moduleFragment.descriptor, hintsPackage),
+                module = moduleFragment
+            ).also { it.metadata = FirMetadataSource.File(partFirFile) }
+            moduleFragment.addFile(partHintFile)
+            currentHintFile = partHintFile
+            currentHintCount = 0
+            createdPartFileNames.add(partFileName)
+        }
 
         for (classId in uniqueTypes) {
             val irClassSymbol = context.referenceClass(classId) ?: continue
@@ -1005,15 +1018,30 @@ class KoinAnnotationProcessor(
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
             function.addDeprecatedHiddenAnnotation(context)
 
-            // Immediately add to IrFile — no intermediate list accumulation
-            hintFile.addChild(function)
-            function.parent = hintFile
+            // Lazy first part, roll over once we cross MAX_HINTS_PER_FILE.
+            if (currentHintFile == null) {
+                openNextDemandPart()
+            } else if (currentHintCount >= KoinPluginConstants.MAX_HINTS_PER_FILE) {
+                currentPartIndex++
+                openNextDemandPart()
+            }
+            val file = currentHintFile!!
+            file.addChild(function)
+            function.parent = file
             context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(function)
+            currentHintCount++
             hintCount++
             KoinPluginLogger.debug { "  + demand hint: ${irClass.fqNameWhenAvailable}" }
         }
 
-        KoinPluginLogger.debug { "  Streamed $hintCount demand hints into $batchFileName" }
+        if (createdPartFileNames.size <= 1) {
+            KoinPluginLogger.debug { "  Streamed $hintCount demand hints into ${createdPartFileNames.firstOrNull() ?: "(no file)"}" }
+        } else {
+            KoinPluginLogger.debug {
+                "  Streamed $hintCount demand hints into ${createdPartFileNames.size} parts " +
+                    "(MAX_HINTS_PER_FILE=${KoinPluginConstants.MAX_HINTS_PER_FILE}): ${createdPartFileNames.joinToString(", ")}"
+            }
+        }
     }
 
     private fun generateModuleScanHints(
@@ -1045,10 +1073,9 @@ class KoinAnnotationProcessor(
 
             KoinPluginLogger.debug { "  Module ${moduleClassId}: generating ${definitions.size} scan hints" }
 
-            // Streaming optimization: create the IrFile FIRST, then add each hint function
-            // directly as it's created. This avoids accumulating all hint functions in an
-            // intermediate list, letting each function's creation IR be eligible for GC
-            // as soon as it's registered.
+            // Streaming optimization: stream each hint function directly into its IrFile as
+            // it's created, so the per-function IR is eligible for GC as soon as it's
+            // registered. No intermediate accumulator list.
             val firModuleData = extractFirModuleData(moduleClass.irClass)
             if (firModuleData == null) {
                 KoinPluginLogger.debug { "    WARN: No FIR module data for ${moduleClass.irClass.name}, skipping hints" }
@@ -1066,35 +1093,64 @@ class KoinAnnotationProcessor(
                 continue
             }
 
-            val batchFileName = "koin_hints_${sanitizedModuleId}.kt"
-            val firFile = buildFile {
-                moduleData = firModuleData
-                origin = FirDeclarationOrigin.Synthetic.PluginFile
-                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-                name = batchFileName
+            // Multi-part hint files: roll over into `koin_hints_<moduleId>_partN.kt` once we
+            // cross MAX_HINTS_PER_FILE in the current part. JVM constant pool is u2-capped
+            // (65 535 entries) and each hint function consumes ~10–20 entries — large
+            // hexagonal codebases (O(100) @Factory in one @ComponentScan module) have produced
+            // 7 MB+ class files that trip ASM ClassReader.readAttribute at Gradle's
+            // classpath-snapshot transform. The first part keeps the unsuffixed file name so
+            // any module that fits below the threshold produces output byte-identical to
+            // before this change (golden tests, hint-file anchors from issue #32 unchanged).
+            var currentPartIndex = 0
+            var currentHintFile: IrFile? = null
+            var currentHintCount = 0
+            var totalHintCount = 0
+            val createdPartFileNames = mutableListOf<String>()
+            val sourceParentPath = Path(sourceFileEntry.name).parent
+
+            fun openNextPart() {
+                val partFileName = if (currentPartIndex == 0)
+                    "koin_hints_${sanitizedModuleId}.kt"
+                else
+                    "koin_hints_${sanitizedModuleId}_part${currentPartIndex}.kt"
+
+                val partFirFile = buildFile {
+                    moduleData = firModuleData
+                    origin = FirDeclarationOrigin.Synthetic.PluginFile
+                    packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+                    name = partFileName
+                }
+                val partFakePath = sourceParentPath.resolve(partFileName)
+                val partHintFile = IrFileImpl(
+                    fileEntry = NaiveSourceBasedFileEntryImpl(partFakePath.absolutePathString()),
+                    packageFragmentDescriptor = EmptyPackageFragmentDescriptor(
+                        moduleFragment.descriptor,
+                        hintsPackage
+                    ),
+                    module = moduleFragment
+                ).also { it.metadata = FirMetadataSource.File(partFirFile) }
+                moduleFragment.addFile(partHintFile)
+                currentHintFile = partHintFile
+                currentHintCount = 0
+                createdPartFileNames.add(partFileName)
             }
-
-            val fakeNewPath = Path(sourceFileEntry.name).parent.resolve(batchFileName)
-            val hintFile = IrFileImpl(
-                fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
-                packageFragmentDescriptor = EmptyPackageFragmentDescriptor(
-                    moduleFragment.descriptor,
-                    hintsPackage
-                ),
-                module = moduleFragment
-            ).also { it.metadata = FirMetadataSource.File(firFile) }
-
-            moduleFragment.addFile(hintFile)
-
-            // Stream each hint function directly into the IrFile as it's created
-            var hintCount = 0
 
             fun emit(func: IrSimpleFunction?) {
                 if (func == null) return
-                hintFile.addChild(func)
-                func.parent = hintFile
+                // Lazy: open the first part on the first real emit, not before — empty
+                // modules don't litter the moduleFragment with an unused IrFile.
+                if (currentHintFile == null) {
+                    openNextPart()
+                } else if (currentHintCount >= KoinPluginConstants.MAX_HINTS_PER_FILE) {
+                    currentPartIndex++
+                    openNextPart()
+                }
+                val file = currentHintFile!!
+                file.addChild(func)
+                func.parent = file
                 context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
-                hintCount++
+                currentHintCount++
+                totalHintCount++
             }
 
             // Track qualified top-level function entries per defType so we can emit a roster per (moduleId, defType).
@@ -1160,11 +1216,16 @@ class KoinAnnotationProcessor(
                 emit(createRosterHintFunction(rosterName, discriminators.sorted()))
             }
 
-            if (hintCount == 0) {
-                // No hints generated — leave the empty IrFile in place (removing is expensive).
+            if (totalHintCount == 0) {
+                // Lazy file creation means no IrFile was emitted at all — nothing to clean up.
                 KoinPluginLogger.debug { "    No hints generated for ${moduleClass.irClass.name}" }
+            } else if (createdPartFileNames.size == 1) {
+                KoinPluginLogger.debug { "    Streamed $totalHintCount hints into single file: ${createdPartFileNames.first()}" }
             } else {
-                KoinPluginLogger.debug { "    Streamed $hintCount hints into single file: $batchFileName" }
+                KoinPluginLogger.debug {
+                    "    Streamed $totalHintCount hints into ${createdPartFileNames.size} parts " +
+                        "(MAX_HINTS_PER_FILE=${KoinPluginConstants.MAX_HINTS_PER_FILE}): ${createdPartFileNames.joinToString(", ")}"
+                }
             }
         }
     }
