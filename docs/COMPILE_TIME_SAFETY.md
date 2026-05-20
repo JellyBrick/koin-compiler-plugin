@@ -103,7 +103,9 @@ Only runs in the entry-point module (the one that calls `startKoin { }`) to avoi
 
 ### Phase 3.5: Pending Call-Site Validation with Deferred Hint Generation
 
-After all definitions are collected and `startKoin` is processed, pending call sites are validated against the combined set of assembled graph types, DSL definitions, and DSL hints from dependencies.
+After all definitions are collected and `startKoin` is processed, pending call sites are validated against the combined set of assembled graph types, local DSL definitions, and cross-module DSL hints from dependencies.
+
+Cross-module DSL hints are merged into the call-site known-types set **unconditionally** — including when A3's full graph is already populated. The assembled graph from A3 only covers `@Module` classes' definitions; it doesn't reach DSL `module { … }` properties loaded via `modules(dslModule)` from upstream source sets. See [Mixing `@KoinApplication` with DSL modules](#mixing-koinapplication-with-dsl-modules) for the mixed-scenario case this closes.
 
 Unresolved call sites in modules without a full graph generate `callsite(required: T)` hint functions in `org.koin.plugin.hints`. These hints are synthetic IR functions that encode the required type as a parameter, allowing downstream modules to discover and validate them.
 
@@ -224,6 +226,116 @@ class ApiClient(@Property("api.timeout") val timeout: Int)
 class Other(@Property("missing.key") val value: String)
 // WARNING — no @PropertyValue("missing.key") found
 ```
+
+## Module Load Order and Overrides
+
+Koin is **last-wins** at runtime: when two modules define the same type, the one loaded last takes precedence. The compiler plugin assembles the module list at the `@KoinApplication` root in this order:
+
+1. **Auto-discovered `@Configuration` modules** (this compilation + dependency JARs) — load first
+2. **Explicit `@KoinApplication(modules = [A, B, C])`** — load last, **in declaration order**
+
+The rationale: apps customise libraries, not the other way round. So the app's explicit list wins over dependency-provided defaults.
+
+```kotlin
+// Dependency JAR — default implementation
+@Module @Configuration
+class CoreModule {
+    @Singleton fun feature(): Feature = DefaultFeature()
+}
+
+// App — custom override
+@Module
+class AppModule {
+    @Singleton fun feature(): Feature = AppFeature()
+}
+
+@KoinApplication(modules = [AppModule::class])
+class MyApp
+// Load order: CoreModule (DefaultFeature) → AppModule (AppFeature wins)
+```
+
+Within the explicit list, declaration order is preserved:
+
+```kotlin
+@KoinApplication(modules = [A::class, B::class, C::class])
+// Load order: (@Configuration deps) → A → A.includes → B → B.includes → C → C.includes
+// Winner among A/B/C: C (declared last)
+```
+
+If a module re-appears in both the explicit list and is also discovered via `@Configuration`, it is loaded once — at its **explicit position** — so the user's declaration order always controls override precedence.
+
+**Escape hatch for fine-grained ordering**: list all participating modules explicitly in `@KoinApplication(modules = [...])` in the desired order. This bypasses classpath-dependent discovery order for `@Configuration` modules.
+
+## Mixing `@KoinApplication` with DSL modules
+
+`@KoinApplication(modules = […])` only accepts `KClass` references to `@Module`-annotated classes — a DSL `module { … }` property has no class to reference, so it cannot live in that annotation list. The composition is one-way: annotations declare the aggregator on top, DSL modules can be added afterward in the trailing lambda of `startKoin<T> { … }`:
+
+```kotlin
+@Module @ComponentScan @Configuration @KoinApplication
+class MyApp
+
+@Singleton class A
+class B(val a: A)
+
+val dslModule = module {
+    single<B>()                    // DSL definition — no @Module class to reference
+}
+
+// In test / app entry:
+val koin = startKoin<MyApp> {
+    modules(dslModule)             // standard KoinApplication.modules(vararg Module)
+}.koin
+val b = koin.get<B>()              // resolves at runtime; must also resolve at compile time
+```
+
+**Coverage**:
+
+| Layer | What's checked | How |
+|-------|----------------|-----|
+| A3 (full graph) | `@Module`-discovered definitions only | Walks `@KoinApplication`-discovered + `@Configuration` modules |
+| A4 (call sites) | A3 graph **+ cross-module DSL hints** | Phase 3.5 unions `dsl_single`/`dsl_factory`/… hints from dependency JARs |
+
+A3 doesn't reach DSL module properties (they are values, not classes — the typed entry doesn't know which DSL modules you'll pass at the call site). A4 does, via the `dsl_<defType>` hints emitted in Phase 2.5 by the source set that owns the DSL module. That's enough to make `koin.get<B>()` resolve cleanly across the source-set boundary in the example above.
+
+**What this does not cover**: dependencies *inside* a DSL module's own definitions are not reverse-checked against the typed entry's annotation graph at A3 time. Those are still validated locally in the source set that declares the DSL module (Phase 3.1 / A4).
+
+## Generic DSL Types
+
+Runtime Koin resolves definitions on the **erased raw class** — type parameters are not part of the lookup key. Compile-safety honours that: a `get<Box<X>>()` call is validated against any `Box<*>` provider in the graph, and two `single<Box<A>>()` / `single<Box<B>>()` declarations collide on the same raw class.
+
+```kotlin
+val appModule = module {
+    single<Navigator<AppKey>>()     // validated as Navigator (raw)
+    single<Navigator<MenuKey>>()    // treated as the same definition
+}
+```
+
+Validating on the raw class is also what makes iOS/Native builds work — emitting the generic type with its free parameter into hint functions used to crash the Kotlin/Native klib signature mangler.
+
+### Discriminating generic instances — use `named<T>()`
+
+When multiple instances of the same generic class must coexist, register a **concrete wrapper type** and key each instance with a type qualifier derived from the generic parameter. This is the pattern used internally by `koin-compose-navigation3`:
+
+```kotlin
+// From koin-compose-navigation3
+inline fun <reified T : Any> Module.navigation(
+    noinline definition: @Composable Scope.(T) -> Unit,
+): KoinDefinition<EntryProviderInstaller> {
+    // Concrete type EntryProviderInstaller + type qualifier derived from T.
+    return _singleInstanceFactory<EntryProviderInstaller>(named<T>(), { ... })
+}
+
+// Caller side
+module {
+    navigation<HomeRoute> { ... }      // keyed by named<HomeRoute>()
+    navigation<SettingsRoute> { ... }  // keyed by named<SettingsRoute>()
+}
+
+// Resolution uses the same type qualifier
+koin.get<EntryProviderInstaller>(named<HomeRoute>())
+```
+
+Runtime Koin matches on (raw class + qualifier), and the compile-safety validator respects qualifier matching — so the plugin sees these as two distinct definitions, as expected. Prefer `named<T>()` qualifier-on-concrete-type over `single<Box<X>>()` directly whenever you need to distinguish generic instantiations.
 
 ## Configuration
 
@@ -453,6 +565,17 @@ if (KoinPluginLogger.compileSafetyEnabled && moduleClasses.isNotEmpty() && annot
 `validateFullGraph()` collects ALL definitions from ALL modules via `annotationProcessor.getDefinitionsForModule()`, includes DSL definitions (`DslDef`) passed from Phase 2, and runs `BindingRegistry.validateModule()` on the union.
 
 The `annotationProcessor` reference is passed from `KoinIrExtension` (Phase 1 → Phase 3).
+
+## Cross-module DSL hint discovery
+
+`DslHintGenerator.discoverDslDefinitionTypes()` scans the classpath for `dsl_single`/`dsl_factory`/`dsl_scoped`/`dsl_viewModel`/`dsl_worker` hint functions in `org.koin.plugin.hints` and returns the FQNames of every provided type encoded across their parameters. This is what surfaces upstream DSL `module { single<X>() }` definitions to consumer modules.
+
+Two call sites in the aggregator consume the result:
+
+- **Phase 3.5** (`CallSiteValidator.validatePendingCallSites`) — unions the hint types into A4's known-types set, so `koin.get<X>()` resolves against DSL modules loaded via `modules(dslModule)` at the `startKoin<T> { … }` call (see [Mixing `@KoinApplication` with DSL modules](#mixing-koinapplication-with-dsl-modules)).
+- **Phase 3.6** (`CallSiteValidator.validateCallSiteHintsFromDependencies`) — same set used to validate `callsite(required: T)` hints from downstream modules.
+
+Both fire in the same compile, so `discoverDslDefinitionTypes()` is memoized via a `by lazy` on `DslHintGenerator` (instantiated once per `KoinIrExtension.generate()`). The underlying `IrPluginContext.referenceFunctions(CallableId)` scan runs once; subsequent calls return the cached `Set<String>`.
 
 ## Test Coverage
 

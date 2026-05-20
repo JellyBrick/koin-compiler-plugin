@@ -12,6 +12,7 @@ Central documentation hub for debugging, developing, and understanding the Koin 
 | [COMPILER_BASICS.md](COMPILER_BASICS.md) | Kotlin compiler plugin fundamentals (IR, FIR, visitors) |
 | [FIR_PROCESSING.md](FIR_PROCESSING.md) | **FIR deep dive** - Source types, KMP phases, synthetic files, cross-module discovery |
 | [PLUGIN_HINTS.md](PLUGIN_HINTS.md) | Cross-module discovery via hint functions |
+| [PROPOSAL_KOIN_EXTENSION.md](PROPOSAL_KOIN_EXTENSION.md) | **Proposal (1.0.1)** — `@KoinExtension` annotation for compile-safety-visible helper functions |
 
 ## Project Overview
 

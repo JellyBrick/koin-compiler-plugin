@@ -30,15 +30,25 @@ object CapturedErrors {
 }
 
 /**
- * Wraps a [MessageCollector] to capture ERROR-severity messages
- * for assertion in error message golden file tests.
+ * Wraps a [MessageCollector] to capture diagnostic-shaped messages for assertion in
+ * golden file tests.
+ *
+ * Captures:
+ *  - All ERROR-severity messages (catches Koin diagnostics + Kotlin compiler errors)
+ *  - WARNING-severity messages that carry a typed `[Koin][KOIN-...]` prefix (catches
+ *    Koin's warning-class diagnostics: KOIN-W*** / KOIN-M*** / KOIN-P***). Non-typed
+ *    `[Koin]` user/debug logs are intentionally excluded so golden files stay focused
+ *    on the diagnostic catalog.
  */
 class CapturingMessageCollector(private val delegate: MessageCollector) : MessageCollector {
     override fun clear() = delegate.clear()
     override fun hasErrors(): Boolean = delegate.hasErrors()
 
     override fun report(severity: CompilerMessageSeverity, message: String, location: CompilerMessageSourceLocation?) {
-        if (severity == CompilerMessageSeverity.ERROR) {
+        val isTypedKoinDiagnostic = message.startsWith("[Koin][KOIN-")
+        if (severity == CompilerMessageSeverity.ERROR ||
+            (severity == CompilerMessageSeverity.WARNING && isTypedKoinDiagnostic)
+        ) {
             CapturedErrors.errors.add(message)
         }
         delegate.report(severity, message, location)
@@ -57,9 +67,11 @@ private class ExtensionRegistrarConfigurator(testServices: TestServices) : Envir
     ) {
         val rawCollector = configuration.get(CommonConfigurationKeys.MESSAGE_COLLECTOR_KEY, MessageCollector.NONE)
         val messageCollector = CapturingMessageCollector(rawCollector)
-        // Initialize the logger for tests (enable both user and debug logs)
-        KoinPluginLogger.init(messageCollector, userLogs = true, debugLogs = true, compileSafety = true)
+        // Initialize the logger for tests (enable both user and debug logs).
+        // Disable aiAssist so golden `.errors.txt` files exercise diagnostic content only,
+        // not the trailing CTA banner — the CTA has its own coverage in KoinDiagnosticTest.
+        KoinPluginLogger.init(messageCollector, userLogs = true, debugLogs = true, compileSafety = true, aiAssist = false)
         FirExtensionRegistrarAdapter.registerExtension(KoinPluginRegistrar())
-        IrGenerationExtension.registerExtension(KoinIrExtension(lookupTracker = null, expectActualTracker = org.jetbrains.kotlin.incremental.components.ExpectActualTracker.DoNothing))
+        IrGenerationExtension.registerExtension(KoinIrExtension(lookupTracker = null, expectActualTracker = org.jetbrains.kotlin.incremental.components.ExpectActualTracker.DoNothing, messageCollector = messageCollector))
     }
 }

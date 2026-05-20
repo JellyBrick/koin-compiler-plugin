@@ -84,7 +84,7 @@ ksp {
 ```kotlin
 // build.gradle.kts
 plugins {
-    id("io.insert-koin.compiler.plugin") version "1.0.0-RC1"
+    id("io.insert-koin.compiler.plugin") version "1.0.0"
 }
 
 dependencies {
@@ -120,6 +120,33 @@ These work exactly the same:
 | `@InjectedParam` | ✅ Same |
 | `@Property("...")` | ✅ Same |
 | `@Scope(T::class)` | ✅ Same |
+| Custom `@Qualifier` annotation (no value) | ⚠️ Behavior change — see note below |
+
+### Custom Qualifier Annotations — Behavior Change
+
+Annotation classes meta-annotated with `@Qualifier` (or `@Named`) that carry no value argument — e.g. `@Qualifier annotation class BaseUrl` — are now bound as **type qualifiers** keyed on the annotation class, matching Koin's runtime `named<T>()` helper.
+
+```kotlin
+@Qualifier
+annotation class BaseUrl
+
+@Singleton
+@BaseUrl
+fun provideBaseUrl(): String = "..."
+```
+
+**Resolution at runtime:**
+
+```kotlin
+// Works — reified form resolves to TypeQualifier(BaseUrl::class)
+koin.get<String>(named<BaseUrl>())
+koin.get<String>(typeQualifier<BaseUrl>())
+
+// No longer works — the plugin does not register a string qualifier for plain custom annotations
+koin.get<String>(named("BaseUrl"))
+```
+
+Custom qualifier annotations that **carry a value** (enum or string arg, e.g. `@Dispatcher(IO)`) are unchanged — they continue to resolve as string qualifiers keyed on the value.
 
 ### Package Changes
 
@@ -302,7 +329,7 @@ Just apply the plugin:
 ```kotlin
 // feature/build.gradle.kts
 plugins {
-    id("io.insert-koin.compiler.plugin") version "1.0.0-RC1"
+    id("io.insert-koin.compiler.plugin") version "1.0.0"
 }
 ```
 

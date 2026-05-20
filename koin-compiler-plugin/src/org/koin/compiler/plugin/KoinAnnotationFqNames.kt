@@ -181,6 +181,9 @@ object KoinAnnotationFqNames {
     /** org.koin.core.qualifier - Qualifier package. */
     val QUALIFIER_PACKAGE = FqName("org.koin.core.qualifier")
 
+    /** org.koin.core.parameter.parametersOf — builds a `ParametersHolder` at call sites. */
+    val PARAMETERS_OF = FqName("org.koin.core.parameter.parametersOf")
+
     // ================================================================================
     // Call-Site Resolution Functions (for A4 call-site validation)
     // ================================================================================

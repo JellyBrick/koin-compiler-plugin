@@ -83,14 +83,14 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 isFakeOverride = false
             )
 
-            // Add parameter with the target class type (concrete type)
+            // Add parameter with the target class type (erased to raw form for generics — see #18)
             val params = mutableListOf<IrValueParameter>()
             val contributedParam = context.irFactory.createValueParameter(
                 startOffset = UNDEFINED_OFFSET,
                 endOffset = UNDEFINED_OFFSET,
                 origin = IrDeclarationOrigin.DEFINED,
                 name = Name.identifier("contributed"),
-                type = targetClass.defaultType,
+                type = targetClass.hintParameterType(context),
                 isAssignable = false,
                 symbol = IrValueParameterSymbolImpl(),
                 index = 0,
@@ -109,7 +109,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                     endOffset = UNDEFINED_OFFSET,
                     origin = IrDeclarationOrigin.DEFINED,
                     name = Name.identifier("binding$bindingIndex"),
-                    type = binding.defaultType,
+                    type = binding.hintParameterType(context),
                     isAssignable = false,
                     symbol = IrValueParameterSymbolImpl(),
                     index = bindingIndex + 1,
@@ -172,7 +172,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                         startOffset = UNDEFINED_OFFSET,
                         endOffset = UNDEFINED_OFFSET,
                         origin = IrDeclarationOrigin.DEFINED,
-                        name = Name.identifier("qualifier_${defQualifier.name.replace('.', '$')}"),
+                        name = Name.identifier("qualifier_${KoinPluginConstants.sanitizeQualifierName(defQualifier.name)}"),
                         type = context.irBuiltIns.unitType,
                         isAssignable = false,
                         symbol = IrValueParameterSymbolImpl(),
@@ -215,9 +215,6 @@ class DslHintGenerator(private val context: IrPluginContext) {
             // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets
             function.addDeprecatedHiddenAnnotation(context)
 
-            // Build deterministic file name
-            val fileName = buildDslHintFileName(targetClassId, hintName)
-
             // Create synthetic FirFile for metadata
             val firModuleData = extractFirModuleData(targetClass)
                 ?: extractFirModuleDataFromModule(moduleFragment)
@@ -226,6 +223,12 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 continue
             }
 
+            // Build deterministic file name, prefixed with a Gradle-module-unique segment so
+            // two modules emitting hints for the same target type produce distinct class names
+            // (no dex merge collision). See KoinPluginConstants.OPTION_MODULE_ID.
+            val prefix = HintFilePrefix.of(firModuleData.name.asString())
+            val fileName = prefix + buildDslHintFileName(targetClassId, hintName)
+
             val firFile = buildFile {
                 moduleData = firModuleData
                 origin = FirDeclarationOrigin.Synthetic.PluginFile
@@ -233,18 +236,24 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 name = fileName
             }
 
-            // Create synthetic IrFile
-            val sourceFileEntry = try {
+            // Anchor the synthetic hint file on a stable source path from the current compile
+            // unit (see issue #32). Priority:
+            //   1. The DSL call's own source file — always a file in the current module, and
+            //      changing the call always dirties this file. Best invalidation signal.
+            //   2. The target class's source file — works for local types; meaningless when the
+            //      target is cross-module.
+            //   3. Alphabetically-first module file — deterministic fallback so the path stays
+            //      stable across incremental rebuilds even when 1 and 2 are unavailable.
+            val targetClassFile = try {
                 val entry = targetClass.fileEntry
-                if (entry.name.contains("/") || entry.name.contains("\\")) entry
+                if (entry.name.contains("/") || entry.name.contains("\\")) entry.name
                 else null
             } catch (_: NotImplementedError) {
                 null
             }
-
-            // Use target class file entry if available, otherwise use first file in module
-            val basePath = sourceFileEntry?.name
-                ?: moduleFragment.files.firstOrNull()?.fileEntry?.name
+            val basePath = def.registrationSourceFile?.fileEntry?.name
+                ?: targetClassFile
+                ?: moduleFragment.files.minByOrNull { it.fileEntry.name }?.fileEntry?.name
                 ?: "/synthetic"
             val fakeNewPath = Path(basePath).parent.resolve(fileName)
 
@@ -307,6 +316,10 @@ class DslHintGenerator(private val context: IrPluginContext) {
      * Discover DSL definition types from hint functions in dependencies.
      * Queries dsl_single, dsl_factory, etc. hint functions and extracts
      * all provided types (concrete + bindings).
+     *
+     * Memoized: the underlying `referenceFunctions` scan is invariant within a single
+     * compile, and both `validatePendingCallSites` (A4) and `validateCallSiteHintsFromDependencies`
+     * (3.6) call this in the aggregator.
      */
     fun discoverDslDefinitionTypes(): Set<String> {
         cachedDslDefinitionTypes?.let { return it }
@@ -384,7 +397,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 val typeQualifierParam = params.firstOrNull { it.name.asString() == "qualifierType" }
                 val qualifier = when {
                     stringQualifierParam != null -> QualifierValue.StringQualifier(
-                        stringQualifierParam.name.asString().removePrefix(qualifierPrefix).replace('$', '.')
+                        KoinPluginConstants.unsanitizeQualifierName(stringQualifierParam.name.asString().removePrefix(qualifierPrefix))
                     )
                     typeQualifierParam != null -> {
                         val qualifierClass = (typeQualifierParam.type.classifierOrNull as? IrClassSymbol)?.owner

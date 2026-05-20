@@ -33,6 +33,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.koin.compiler.plugin.KoinAnnotationFqNames
+import org.koin.compiler.plugin.KoinDiagnostic
 import org.koin.compiler.plugin.KoinPluginConstants
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.ProvidedTypeRegistry
@@ -108,6 +109,20 @@ class KoinAnnotationProcessor(
     // Cache for configuration module discovery (A2 sibling resolution)
     // Inspired by @JellyBrick (PR #5 — https://github.com/InsertKoinIO/koin-compiler-plugin/pull/5)
     private val configurationModulesCache = mutableMapOf<List<String>, List<IrClass>>()
+
+    // Indexes derived from `definitionClasses` / `definitionTopLevelFunctions`. Lazily initialized
+    // because both lists are mutated during Phase 1 (collectAnnotations) and only read in Phase 2/3.
+    // `findMatchingDefinitions` and `discoverDefinitionsFromHints` would otherwise rescan or
+    // O(n²)-check these per @Module.
+    private val localDefinitionFqNames: Set<String> by lazy {
+        definitionClasses.mapNotNullTo(hashSetOf()) { it.irClass.fqNameWhenAvailable?.asString() }
+    }
+    private val definitionsByPackage: Map<String, List<DefinitionClass>> by lazy {
+        definitionClasses.groupBy { it.packageFqName.asString() }
+    }
+    private val topLevelFunctionsByPackage: Map<String, List<DefinitionTopLevelFunction>> by lazy {
+        definitionTopLevelFunctions.groupBy { it.packageFqName.asString() }
+    }
 
     /** Exposed for cross-phase validation (A3: startKoin full-graph). */
     val collectedModuleClasses: List<ModuleClass> get() = moduleClasses
@@ -248,7 +263,8 @@ class KoinAnnotationProcessor(
             val scanPackages = if (hasComponentScan) getComponentScanPackages(declaration) else emptyList()
             val definitionFunctions = collectDefinitionFunctions(declaration)
             val includedModules = getModuleIncludes(declaration)
-            moduleClasses.add(ModuleClass(declaration, hasComponentScan, scanPackages, definitionFunctions, includedModules))
+            val moduleCreatedAtStart = getModuleCreatedAtStart(declaration)
+            moduleClasses.add(ModuleClass(declaration, hasComponentScan, scanPackages, definitionFunctions, includedModules, moduleCreatedAtStart))
 
             // Log module discovery (guard to avoid precomputation when logging is disabled)
             if (KoinPluginLogger.userLogsEnabled) {
@@ -307,15 +323,16 @@ class KoinAnnotationProcessor(
                 detectBindings(declaration)
             }
             val scopeClass = getScopeClass(declaration)
+            val scopeName = getScopeName(declaration)
             val createdAtStart = getCreatedAtStart(declaration)
             // If scope archetype is present but no definition type, default to SCOPED
             val finalDefinitionType = definitionType ?: DefinitionType.SCOPED
             definitionClasses.add(DefinitionClass(
                 declaration, finalDefinitionType, packageFqName, bindings,
-                scopeClass, scopeArchetype, createdAtStart
+                scopeClass, scopeName, scopeArchetype, createdAtStart
             ))
 
-            logDefinitionDiscovery(declaration, finalDefinitionType, scopeArchetype, scopeClass, bindings, createdAtStart, "class ${declaration.name}")
+            logDefinitionDiscovery(declaration, finalDefinitionType, scopeArchetype, scopeClass, scopeName, bindings, createdAtStart, "class ${declaration.name}")
         }
     }
 
@@ -331,15 +348,16 @@ class KoinAnnotationProcessor(
         val packageFqName = (declaration.parent as? IrFile)?.packageFqName ?: FqName.ROOT
         val bindings = getExplicitBindings(declaration) ?: emptyList()
         val scopeClass = getScopeClass(declaration)
+        val scopeName = getScopeName(declaration)
         val scopeArchetype = getScopeArchetype(declaration)
         val createdAtStart = getCreatedAtStart(declaration)
 
         definitionTopLevelFunctions.add(DefinitionTopLevelFunction(
             declaration, definitionType, packageFqName, returnTypeClass,
-            bindings, scopeClass, scopeArchetype, createdAtStart
+            bindings, scopeClass, scopeName, scopeArchetype, createdAtStart
         ))
 
-        logDefinitionDiscovery(declaration, definitionType, scopeArchetype, scopeClass, bindings, createdAtStart, "function ${declaration.name}() -> ${returnTypeClass.name}")
+        logDefinitionDiscovery(declaration, definitionType, scopeArchetype, scopeClass, scopeName, bindings, createdAtStart, "function ${declaration.name}() -> ${returnTypeClass.name}")
     }
 
     /**
@@ -374,6 +392,7 @@ class KoinAnnotationProcessor(
         definitionType: DefinitionType,
         scopeArchetype: ScopeArchetype?,
         scopeClass: IrClass?,
+        scopeName: String?,
         bindings: List<IrClass>,
         createdAtStart: Boolean,
         targetName: String? = null
@@ -387,6 +406,9 @@ class KoinAnnotationProcessor(
         }
         if (scopeClass != null) {
             KoinPluginLogger.user { "  @Scope(${scopeClass.name}::class)" }
+        }
+        if (scopeName != null) {
+            KoinPluginLogger.user { "  @Scope(name = \"$scopeName\")" }
         }
         if (bindings.isNotEmpty()) {
             KoinPluginLogger.user { "  Binds: ${bindings.joinToString(", ") { it.name.asString() }}" }
@@ -406,7 +428,8 @@ class KoinAnnotationProcessor(
     }
 
     /**
-     * Get the scope class from @Scope(MyScope::class) annotation.
+     * Get the scope class from `@Scope(MyScope::class)` (typed scope).
+     * Returns null for the string-named variant `@Scope(name = "session")` — use [getScopeName] for that.
      * Works on both classes and functions.
      */
     private fun getScopeClass(declaration: IrDeclaration): IrClass? {
@@ -419,6 +442,29 @@ class KoinAnnotationProcessor(
             is IrClassReferenceImpl -> valueArg.classType.classifierOrNull?.owner as? IrClass
             else -> null
         }
+    }
+
+    /**
+     * Get the scope qualifier name from `@Scope(name = "session")` (string-named scope).
+     * Returns null when the annotation only has the typed `value` argument — use [getScopeClass] for that.
+     *
+     * Bug it fixes (KTZ-4039 / #34): without this, both `@Scope(name = ...)` variants were silently
+     * dropped — the typed-scope partition in `buildModuleBody` saw `scopeClass == null` and routed the
+     * definition through `buildScoped` on a `Module` receiver, where no such overload exists, producing
+     * no bean definition at all.
+     */
+    private fun getScopeName(declaration: IrDeclaration): String? {
+        val scopeAnnotation = declaration.annotations.firstOrNull { annotation ->
+            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.SCOPE.asString()
+        } ?: return null
+
+        // @Scope is declared as `(value: KClass = Unit::class, name: String = "")` — name is positional
+        // arg index 1 when supplied. IrCall stores explicit named-args at their declared parameter
+        // index, so getValueArgument(1) returns the user's `name = "..."` whether they wrote it
+        // positionally or as a named argument.
+        val nameArg = scopeAnnotation.getValueArgument(1) as? org.jetbrains.kotlin.ir.expressions.IrConst
+        val value = nameArg?.value as? String
+        return value?.takeIf { it.isNotEmpty() }
     }
 
     private fun getDefinitionType(declaration: IrDeclaration): DefinitionType? {
@@ -484,12 +530,33 @@ class KoinAnnotationProcessor(
             fqName == KoinAnnotationFqNames.SINGLETON.asString() || fqName == KoinAnnotationFqNames.SINGLE.asString()
         } ?: return false
 
-        // createdAtStart: look up by name first, then fall back to positional index 1
-        val createdAtStartArg = annotation.getValueArgument(Name.identifier("createdAtStart"))
-            ?: annotation.getValueArgument(1)
+        // createdAtStart: look up by name first, then fall back to positional index 1.
+        // Signature: `@Single(binds: Array<KClass<*>> = [], createdAtStart: Boolean = false)`.
+        return extractBooleanArg(annotation, Name.identifier("createdAtStart"), positionalFallbackIndex = 1)
+    }
 
-        return when (createdAtStartArg) {
-            is IrConst -> createdAtStartArg.value as? Boolean ?: false
+    /**
+     * Get `createdAtStart` from `@Module(createdAtStart = true)`. Drives whether the generated
+     * `module(...)` DSL call passes `createdAtStart = true` to eagerly instantiate every
+     * `@Single` / `@Singleton` in the module at `startKoin`. KTZ-4048 / koin#2415.
+     *
+     * Signature: `@Module(includes: Array<KClass<*>> = [], createdAtStart: Boolean = false)`.
+     */
+    private fun getModuleCreatedAtStart(declaration: IrClass): Boolean {
+        val annotation = declaration.annotations.firstOrNull { annotation ->
+            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.MODULE.asString()
+        } ?: return false
+        return extractBooleanArg(annotation, Name.identifier("createdAtStart"), positionalFallbackIndex = 1)
+    }
+
+    private fun extractBooleanArg(
+        annotation: org.jetbrains.kotlin.ir.expressions.IrConstructorCall,
+        name: Name,
+        positionalFallbackIndex: Int
+    ): Boolean {
+        val arg = annotation.getValueArgument(name) ?: annotation.getValueArgument(positionalFallbackIndex)
+        return when (arg) {
+            is IrConst -> arg.value as? Boolean ?: false
             else -> false
         }
     }
@@ -551,10 +618,12 @@ class KoinAnnotationProcessor(
                 val defType = getDefinitionType(function) ?: return@mapNotNull null
                 val returnType = function.returnType
                 val returnTypeClass = (returnType.classifierOrNull?.owner as? IrClass) ?: return@mapNotNull null
+                val bindings = getExplicitBindings(function) ?: emptyList()
                 val scopeClass = getScopeClass(function)
+                val scopeName = getScopeName(function)
                 val scopeArchetype = getScopeArchetype(function)
                 val createdAtStart = getCreatedAtStart(function)
-                DefinitionFunction(function, defType, returnTypeClass, scopeClass, scopeArchetype, createdAtStart)
+                DefinitionFunction(function, defType, returnTypeClass, bindings, scopeClass, scopeName, scopeArchetype, createdAtStart)
             }
     }
 
@@ -891,11 +960,6 @@ class KoinAnnotationProcessor(
 
         moduleFragment.addFile(hintFile)
 
-        // Memory optimization: create shared IR objects for all demand hint functions.
-        // All demand hints have identical empty bodies and @Deprecated(HIDDEN) annotations.
-        val sharedEmptyBody = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
-        val sharedDeprecatedAnnotation = buildDeprecatedHiddenAnnotation(context)
-
         var hintCount = 0
 
         for (classId in uniqueTypes) {
@@ -938,13 +1002,8 @@ class KoinAnnotationProcessor(
             )
             valueParam.parent = function
             function.valueParameters = listOf(valueParam)
-            // Reuse shared empty body and annotation across all demand hint functions
-            function.body = sharedEmptyBody
-            if (sharedDeprecatedAnnotation != null) {
-                function.annotations = function.annotations + sharedDeprecatedAnnotation
-            } else {
-                function.addDeprecatedHiddenAnnotation(context)
-            }
+            function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+            function.addDeprecatedHiddenAnnotation(context)
 
             // Immediately add to IrFile — no intermediate list accumulation
             hintFile.addChild(function)
@@ -963,22 +1022,21 @@ class KoinAnnotationProcessor(
     ) {
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
 
-        // Only process @Configuration modules with @ComponentScan
-        val configModulesWithScan = moduleClasses.filter { moduleClass ->
-            moduleClass.hasComponentScan && hasConfigurationAnnotation(moduleClass.irClass)
+        // Process all @Module classes that have @ComponentScan.
+        // @Configuration is for module grouping/auto-loading labels; it must not gate cross-module
+        // hint visibility. Without this, a @Module + @ComponentScan (no @Configuration) in a
+        // library module produced zero hints (orphan path skips scan-covered defs, scan path was
+        // filtered out), breaking compileSafety validation in consumers.
+        // Fix contributed by @wjz2001 (PR #25 — https://github.com/InsertKoinIO/koin-compiler-plugin/pull/25)
+        val modulesWithScan = moduleClasses.filter { it.hasComponentScan }
+        if (modulesWithScan.isEmpty()) return
+
+        val configCount = modulesWithScan.count { hasConfigurationAnnotation(it.irClass) }
+        KoinPluginLogger.debug {
+            "generateModuleScanHints: ${modulesWithScan.size} @Module modules with @ComponentScan (config=$configCount)"
         }
 
-        if (configModulesWithScan.isEmpty()) return
-
-        KoinPluginLogger.debug { "generateModuleScanHints: ${configModulesWithScan.size} @Configuration modules with @ComponentScan" }
-
-        // Memory optimization: create shared IR objects for all hint functions across all modules.
-        // All hint functions have identical empty bodies and @Deprecated(HIDDEN) annotations,
-        // so we create one instance of each and reuse them to avoid per-function IR allocation.
-        val sharedEmptyBody = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
-        val sharedDeprecatedAnnotation = buildDeprecatedHiddenAnnotation(context)
-
-        for (moduleClass in configModulesWithScan) {
+        for (moduleClass in modulesWithScan) {
             val definitions = moduleDefinitions[moduleClass] ?: continue
             if (definitions.isEmpty()) continue
 
@@ -1031,53 +1089,79 @@ class KoinAnnotationProcessor(
             // Stream each hint function directly into the IrFile as it's created
             var hintCount = 0
 
+            fun emit(func: IrSimpleFunction?) {
+                if (func == null) return
+                hintFile.addChild(func)
+                func.parent = hintFile
+                context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
+                hintCount++
+            }
+
+            // Track qualified top-level function entries per defType so we can emit a roster per (moduleId, defType).
+            // The roster lets cross-module consumers enumerate qualifiers they'd otherwise have no way to discover.
+            // LinkedHashSet: O(1) duplicate check + preserved insertion order for deterministic debug logs.
+            val qualifiedEntriesByDefType = mutableMapOf<String, LinkedHashSet<String>>()
+
             for (definition in definitions) {
                 val defTypeStr = definitionTypeToString(definition.definitionType)
                 val targetClass = definition.returnTypeClass
 
-                val func: IrSimpleFunction? = when (definition) {
+                when (definition) {
                     is Definition.ClassDef -> {
                         // Class definition hint: componentscan_<moduleId>_<defType>
                         val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
                         // Extract qualifier from the local class so cross-module consumers can recover it
                         val classQualifier = definition.qualifier ?: qualifierExtractor.extractFromClass(definition.irClass)
                         KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }} qualifier=${classQualifier?.debugString()}" }
-                        createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, classQualifier, sharedEmptyBody, sharedDeprecatedAnnotation)
+                        emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, classQualifier))
                     }
                     is Definition.ExternalFunctionDef -> {
                         // External function definition hint: componentscan_<moduleId>_<defType>
                         val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
                         KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }}" }
-                        createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, definition.qualifier, sharedEmptyBody, sharedDeprecatedAnnotation)
+                        emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, definition.qualifier))
                     }
                     is Definition.TopLevelFunctionDef -> {
-                        // Function definition hint: componentscanfunc_<moduleId>_<defType>
-                        val hintName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedModuleId, defTypeStr)
                         // Top-level functions extract qualifier from the function declaration
                         val funcQualifier = qualifierExtractor.extractFromDeclaration(definition.irFunction)
-                        KoinPluginLogger.debug { "    + componentscanfunc hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }} qualifier=${funcQualifier?.debugString()}" }
-                        createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, funcQualifier, sharedEmptyBody, sharedDeprecatedAnnotation)
+                        if (funcQualifier == null) {
+                            // Unqualified: legacy shared-name overload keyed on target type
+                            val hintName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedModuleId, defTypeStr)
+                            KoinPluginLogger.debug { "    + componentscanfunc hint (unqualified): ${targetClass.name} ($defTypeStr)" }
+                            emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, null))
+                        } else {
+                            // Qualified: per-qualifier entry under unique name to avoid signature clashes
+                            // when multiple functions share the same target type (e.g., Unit-returning initializers).
+                            val discriminator = qualifierDiscriminator(funcQualifier)
+                            val existing = qualifiedEntriesByDefType.getOrPut(defTypeStr) { LinkedHashSet() }
+                            if (!existing.add(discriminator)) {
+                                // Two source funcs with the same (target, qualifier) — Koin-level duplicate binding.
+                                KoinPluginLogger.debug { "    ! duplicate qualifier '$discriminator' for $defTypeStr in ${moduleClass.irClass.name} — skipping second entry" }
+                            } else {
+                                val entryName = KoinModuleFirGenerator.moduleScanFunctionEntryHintName(sanitizedModuleId, defTypeStr, discriminator)
+                                KoinPluginLogger.debug { "    + componentscanfunc entry: ${targetClass.name} ($defTypeStr) qualifier=${funcQualifier.debugString()} -> $entryName" }
+                                emit(createHintFunction(entryName, targetClass, definition.bindings, definition.scopeClass, funcQualifier))
+                            }
+                        }
                     }
-                    is Definition.DslDef -> null // DSL definitions don't generate hints
+                    is Definition.DslDef -> {} // DSL definitions don't generate hints
                     is Definition.FunctionDef -> {
                         // Skip: module-internal function definitions (@Singleton fun provide...() inside @Module classes)
                         // are NOT component-scanned. They are resolved directly from the module class, not via hints.
-                        null
                     }
-                }
-
-                if (func != null) {
-                    // Immediately add to IrFile — no intermediate list accumulation
-                    hintFile.addChild(func)
-                    func.parent = hintFile
-                    context.metadataDeclarationRegistrar.registerFunctionAsMetadataVisible(func)
-                    hintCount++
                 }
             }
 
+            // Emit one roster per (moduleId, defType) that had any qualified top-level entries.
+            // Sort discriminators for stable roster param ordering across recompilations.
+            for ((defTypeStr, discriminators) in qualifiedEntriesByDefType) {
+                val rosterName = KoinModuleFirGenerator.moduleScanFunctionRosterHintName(sanitizedModuleId, defTypeStr)
+                KoinPluginLogger.debug { "    + componentscanfunc roster: $defTypeStr lists ${discriminators.size} qualifier(s) -> $rosterName" }
+                emit(createRosterHintFunction(rosterName, discriminators.sorted()))
+            }
+
             if (hintCount == 0) {
-                // No hints generated — remove the empty file
-                // (moduleFragment.files is mutable, but removing is expensive; leave empty file as-is)
+                // No hints generated — leave the empty IrFile in place (removing is expensive).
                 KoinPluginLogger.debug { "    No hints generated for ${moduleClass.irClass.name}" }
             } else {
                 KoinPluginLogger.debug { "    Streamed $hintCount hints into single file: $batchFileName" }
@@ -1131,13 +1215,13 @@ class KoinAnnotationProcessor(
 
         val params = mutableListOf<IrValueParameter>()
 
-        // Primary parameter: contributed target type
+        // Primary parameter: contributed target type (erased to raw form for generics — see #18)
         val contributedParam = context.irFactory.createValueParameter(
             startOffset = UNDEFINED_OFFSET,
             endOffset = UNDEFINED_OFFSET,
             origin = IrDeclarationOrigin.DEFINED,
             name = Name.identifier("contributed"),
-            type = targetClass.defaultType,
+            type = targetClass.hintParameterType(context),
             isAssignable = false,
             symbol = IrValueParameterSymbolImpl(),
             index = 0,
@@ -1156,7 +1240,7 @@ class KoinAnnotationProcessor(
                 endOffset = UNDEFINED_OFFSET,
                 origin = IrDeclarationOrigin.DEFINED,
                 name = Name.identifier("binding$index"),
-                type = binding.defaultType,
+                type = binding.hintParameterType(context),
                 isAssignable = false,
                 symbol = IrValueParameterSymbolImpl(),
                 index = params.size,
@@ -1197,7 +1281,7 @@ class KoinAnnotationProcessor(
                     startOffset = UNDEFINED_OFFSET,
                     endOffset = UNDEFINED_OFFSET,
                     origin = IrDeclarationOrigin.DEFINED,
-                    name = Name.identifier("qualifier_${qualifier.name}"),
+                    name = Name.identifier("qualifier_${KoinPluginConstants.sanitizeQualifierName(qualifier.name)}"),
                     type = context.irBuiltIns.unitType,
                     isAssignable = false,
                     symbol = IrValueParameterSymbolImpl(),
@@ -1276,6 +1360,68 @@ class KoinAnnotationProcessor(
                 }
             } else null
         }
+    }
+
+    /**
+     * Stable string discriminator for a qualifier. Used both in the per-qualifier entry hint name
+     * (`componentscanfunc_..._single__q_<discriminator>`) and as the roster's parameter name
+     * (`q_<discriminator>`). Must be reversible and produce a valid Kotlin identifier.
+     */
+    private fun qualifierDiscriminator(qualifier: QualifierValue): String = when (qualifier) {
+        is QualifierValue.StringQualifier -> KoinPluginConstants.sanitizeQualifierName(qualifier.name)
+        is QualifierValue.TypeQualifier -> KoinPluginConstants.sanitizeQualifierName(
+            qualifier.irClass.fqNameWhenAvailable?.asString() ?: qualifier.irClass.name.asString()
+        )
+    }
+
+    /**
+     * Create a roster hint function whose parameter names enumerate the per-qualifier entry
+     * discriminators for a given (moduleId, defType). All parameters are `Unit`-typed; the names
+     * are the payload. Consumer reads the names to find which per-qualifier entries to look up.
+     */
+    private fun createRosterHintFunction(hintName: Name, sanitizedQualifiers: List<String>): IrSimpleFunction {
+        val function = context.irFactory.createSimpleFunction(
+            startOffset = UNDEFINED_OFFSET,
+            endOffset = UNDEFINED_OFFSET,
+            origin = IrDeclarationOrigin.DEFINED,
+            name = hintName,
+            visibility = DescriptorVisibilities.PUBLIC,
+            isInline = false,
+            isExpect = false,
+            returnType = context.irBuiltIns.unitType,
+            modality = Modality.FINAL,
+            symbol = IrSimpleFunctionSymbolImpl(),
+            isTailrec = false,
+            isSuspend = false,
+            isOperator = false,
+            isInfix = false,
+            isExternal = false,
+            containerSource = null,
+            isFakeOverride = false
+        )
+
+        val params = sanitizedQualifiers.mapIndexed { index, sanitized ->
+            context.irFactory.createValueParameter(
+                startOffset = UNDEFINED_OFFSET,
+                endOffset = UNDEFINED_OFFSET,
+                origin = IrDeclarationOrigin.DEFINED,
+                name = Name.identifier("${KoinPluginConstants.COMPONENT_SCAN_FUNCTION_ROSTER_PARAM_PREFIX}$sanitized"),
+                type = context.irBuiltIns.unitType,
+                isAssignable = false,
+                symbol = IrValueParameterSymbolImpl(),
+                index = index,
+                varargElementType = null,
+                isCrossinline = false,
+                isNoinline = false,
+                isHidden = false
+            ).also { it.parent = function }
+        }
+
+        function.valueParameters = params
+        function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+        function.addDeprecatedHiddenAnnotation(context)
+
+        return function
     }
 
     /** Extract FIR module data from an IR class's metadata, skipping binary dependency module data. */
@@ -1441,10 +1587,10 @@ class KoinAnnotationProcessor(
             p.name.asString() == "moduleDeclaration"
         }}?.owner
         if (moduleDslFunction == null) {
-            KoinPluginLogger.error(
-                "Cannot generate ${moduleClass.irClass.name}.module(): " +
-                "org.koin.dsl.module() not found on classpath. " +
-                "Please add io.insert-koin:koin-core to your dependencies."
+            KoinPluginLogger.report(
+                KoinDiagnostic.MissingCoreArtifact(
+                    moduleClassName = moduleClass.irClass.name.asString(),
+                )
             )
             // Generate error("Stub!") body to prevent backend crash
             generateErrorStubBody(function)
@@ -1503,6 +1649,7 @@ class KoinAnnotationProcessor(
                 defClass.definitionType,
                 defClass.bindings,
                 defClass.scopeClass,
+                defClass.scopeName,
                 defClass.scopeArchetype,
                 defClass.createdAtStart,
                 defClass.qualifier
@@ -1516,8 +1663,9 @@ class KoinAnnotationProcessor(
                 moduleClass.irClass,
                 defFunc.definitionType,
                 defFunc.returnTypeClass,
-                emptyList(), // bindings — function definitions don't yet support explicit binds
-                defFunc.scopeClass, // Scope class from @Scope annotation
+                defFunc.bindings,
+                defFunc.scopeClass, // Typed scope from @Scope(MyScope::class)
+                defFunc.scopeName, // String-named scope from @Scope(name = "...")
                 defFunc.scopeArchetype, // Scope archetype from @ViewModelScope, @ActivityScope, etc.
                 defFunc.createdAtStart
             ))
@@ -1532,6 +1680,7 @@ class KoinAnnotationProcessor(
                 defFunc.returnTypeClass,
                 defFunc.bindings,
                 defFunc.scopeClass,
+                defFunc.scopeName,
                 defFunc.scopeArchetype,
                 defFunc.createdAtStart
             )
@@ -1572,10 +1721,9 @@ class KoinAnnotationProcessor(
 
         KoinPluginLogger.debug { "  Scanning packages: ${scanPackages.joinToString(", ")} (recursive)" }
 
-        // Local definitions from current compilation unit
-        val localDefinitions = definitionClasses.filter { definition ->
-            matchesScanPackages(definition.packageFqName.asString(), scanPackages)
-        }
+        // Local definitions from current compilation unit (package index avoids re-filtering
+        // the full `definitionClasses` list per @Module — see `definitionsByPackage`).
+        val localDefinitions = collectFromPackageIndex(definitionsByPackage, scanPackages)
 
         // Cross-module definitions from hints (definitions from other Gradle modules)
         val crossModuleDefinitions = discoverDefinitionsFromHints(scanPackages)
@@ -1606,9 +1754,7 @@ class KoinAnnotationProcessor(
 
         val scanPackages = moduleClass.effectiveScanPackages()
 
-        val matchingFunctions = definitionTopLevelFunctions.filter { definition ->
-            matchesScanPackages(definition.packageFqName.asString(), scanPackages)
-        }
+        val matchingFunctions = collectFromPackageIndex(topLevelFunctionsByPackage, scanPackages)
 
         if (KoinPluginLogger.userLogsEnabled && matchingFunctions.isNotEmpty()) {
             val moduleName = moduleClass.irClass.name.asString()
@@ -1627,13 +1773,6 @@ class KoinAnnotationProcessor(
      */
     private fun discoverDefinitionsFromHints(scanPackages: List<String>): List<DefinitionClass> {
         val discovered = mutableListOf<DefinitionClass>()
-
-        // Pre-build Set of known definition FqNames for O(1) duplicate checking
-        val knownDefinitionFqNames = buildSet<FqName> {
-            for (defClass in definitionClasses) {
-                defClass.irClass.fqNameWhenAvailable?.let { add(it) }
-            }
-        }
 
         // Query each definition type
         for (defType in KoinModuleFirGenerator.ALL_DEFINITION_TYPES) {
@@ -1656,8 +1795,7 @@ class KoinAnnotationProcessor(
                 if (!matchesScanPackages(defPackage, scanPackages)) continue
 
                 // Skip if we already have this class in local definitions (O(1) Set lookup)
-                val defFqName = defClass.fqNameWhenAvailable
-                if (defFqName != null && defFqName in knownDefinitionFqNames) {
+                if (defClass.fqNameWhenAvailable?.asString() in localDefinitionFqNames) {
                     KoinPluginLogger.debug { "    Skipping ${defClass.name} - already in local definitions" }
                     continue
                 }
@@ -1689,7 +1827,7 @@ class KoinAnnotationProcessor(
                 val qualifier: QualifierValue? = run {
                     val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
                     if (qParam != null) {
-                        QualifierValue.StringQualifier(qParam.name.asString().removePrefix("qualifier_"))
+                        QualifierValue.StringQualifier(KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_")))
                     } else {
                         val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
                         if (qTypeParam != null) {
@@ -1709,6 +1847,7 @@ class KoinAnnotationProcessor(
                     packageFqName = FqName(defPackage),
                     bindings = bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass = scopeClass,
+                    scopeName = getScopeName(defClass),
                     scopeArchetype = getScopeArchetype(defClass),
                     createdAtStart = createdAtStart,
                     qualifier = qualifier
@@ -1783,7 +1922,7 @@ class KoinAnnotationProcessor(
                 val qualifier: QualifierValue? = run {
                     val qualifierParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
                     if (qualifierParam != null) {
-                        val name = qualifierParam.name.asString().removePrefix("qualifier_")
+                        val name = KoinPluginConstants.unsanitizeQualifierName(qualifierParam.name.asString().removePrefix("qualifier_"))
                         QualifierValue.StringQualifier(name)
                     } else {
                         val qualTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
@@ -1864,13 +2003,16 @@ class KoinAnnotationProcessor(
         val moduleFunctions = collectDefinitionFunctions(moduleIrClass)
         KoinPluginLogger.debug { "      Module functions: ${moduleFunctions.size} (${moduleFunctions.joinToString { it.irFunction.name.asString() }})" }
         for (defFunc in moduleFunctions) {
+            val hintBindings = discoverModuleFunctionBindingsFromHint(moduleIrClass, defFunc)
+            val bindings = if (hintBindings.isNotEmpty()) hintBindings else defFunc.bindings
             definitions.add(Definition.FunctionDef(
                 defFunc.irFunction,
                 moduleIrClass,
                 defFunc.definitionType,
                 defFunc.returnTypeClass,
-                emptyList(), // bindings — function definitions don't yet support explicit binds
+                bindings,
                 defFunc.scopeClass,
+                defFunc.scopeName,
                 defFunc.scopeArchetype,
                 defFunc.createdAtStart
             ))
@@ -1951,6 +2093,41 @@ class KoinAnnotationProcessor(
         return DependencyModuleResult(definitions, isComplete = isComplete)
     }
 
+    private fun discoverModuleFunctionBindingsFromHint(
+        moduleIrClass: IrClass,
+        defFunc: DefinitionFunction
+    ): List<IrClass> {
+        val moduleClassId = moduleIrClass.classId ?: return emptyList()
+        val moduleId = KoinModuleFirGenerator.sanitizeModuleIdForHint(moduleClassId)
+        val hintName = KoinModuleFirGenerator.moduleDefinitionHintFunctionName(
+            moduleId,
+            defFunc.irFunction.name.asString()
+        )
+        val hintFunctions = cachedReferenceFunctions(
+            CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, hintName)
+        )
+        val returnTypeFqName = defFunc.returnTypeClass.fqNameWhenAvailable
+
+        for (hintFuncSymbol in hintFunctions) {
+            val hintFunc = hintFuncSymbol.owner
+            val contributedType = hintFunc.valueParameters.firstOrNull()?.type
+            val contributedClass = (contributedType?.classifierOrNull as? IrClassSymbol)?.owner
+            if (returnTypeFqName != null && contributedClass?.fqNameWhenAvailable != returnTypeFqName) continue
+
+            val bindings = hintFunc.valueParameters
+                .filter { it.name.asString().startsWith("binding") }
+                .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+            if (bindings.isNotEmpty()) {
+                KoinPluginLogger.debug {
+                    "      Module function hint bindings for ${moduleIrClass.name}.${defFunc.irFunction.name}(): ${bindings.map { it.fqNameWhenAvailable }}"
+                }
+                return bindings
+            }
+        }
+
+        return emptyList()
+    }
+
     /**
      * Discover class definitions from hints and convert to Definition.ClassDef.
      */
@@ -1961,6 +2138,7 @@ class KoinAnnotationProcessor(
                 defClass.definitionType,
                 defClass.bindings,
                 defClass.scopeClass,
+                defClass.scopeName,
                 defClass.scopeArchetype,
                 defClass.createdAtStart,
                 defClass.qualifier
@@ -2025,7 +2203,7 @@ class KoinAnnotationProcessor(
                 val classQualifier: QualifierValue? = run {
                     val qParam = classParams.firstOrNull { it.name.asString().startsWith("qualifier_") }
                     if (qParam != null) {
-                        QualifierValue.StringQualifier(qParam.name.asString().removePrefix("qualifier_"))
+                        QualifierValue.StringQualifier(KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_")))
                     } else {
                         val qTypeParam = classParams.firstOrNull { it.name.asString() == "qualifierType" }
                         if (qTypeParam != null) {
@@ -2044,57 +2222,52 @@ class KoinAnnotationProcessor(
                     definitionType,
                     bindings.distinctBy { it.fqNameWhenAvailable },
                     scopeClass,
+                    getScopeName(defClass),
                     getScopeArchetype(defClass),
                     createdAtStart,
                     classQualifier
                 ))
             }
 
-            // Function definition hints: componentscanfunc_<moduleId>_<defType>
-            val funcName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedId, defType)
-            val funcHintFunctions = cachedReferenceFunctions(
-                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, funcName)
+            val definitionType = parseDefinitionType(defType) ?: continue
+
+            // Dedupe key: (returnType fqName, qualifier debug string). Covers both
+            // (a) class-vs-function same-type collisions (today's behavior) and
+            // (b) multiple same-type function entries discriminated by qualifier.
+            val seenKeys = definitions.mapTo(mutableSetOf()) { definitionDedupeKey(it) }
+
+            // (1) Legacy shared-name hint overloads. Handles unqualified top-level function entries
+            //     (current producer) and, for backward compat, qualified entries produced by older
+            //     plugin versions that didn't use per-qualifier entry hints yet.
+            val legacyName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedId, defType)
+            val legacyHints = cachedReferenceFunctions(
+                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, legacyName)
             )
+            for (hintFuncSymbol in legacyHints) {
+                addExternalFunctionDefFromHint(hintFuncSymbol.owner, definitionType, defType, definitions, seenKeys)
+            }
 
-            for (hintFuncSymbol in funcHintFunctions) {
-                val hintFunc = hintFuncSymbol.owner
-                val funcParams = hintFunc.valueParameters
-                val paramType = funcParams.firstOrNull()?.type ?: continue
-                val returnTypeClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
-
-                val funcFqName = returnTypeClass.fqNameWhenAvailable ?: continue
-                if (!seenFqNames.add(funcFqName)) continue
-
-                val definitionType = parseDefinitionType(defType) ?: continue
-
-                // Extract enriched metadata from hint parameters (C2: cross-module function hint metadata)
-                val funcBindings = funcParams.filter { it.name.asString().startsWith("binding") }
-                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                val funcScopeClass = funcParams.firstOrNull { it.name.asString() == "scope" }
-                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                val funcQualifier: QualifierValue? = run {
-                    val qualifierParam = funcParams.firstOrNull { it.name.asString().startsWith("qualifier_") }
-                    if (qualifierParam != null) {
-                        val qName = qualifierParam.name.asString().removePrefix("qualifier_")
-                        QualifierValue.StringQualifier(qName)
-                    } else {
-                        val qualTypeParam = funcParams.firstOrNull { it.name.asString() == "qualifierType" }
-                        if (qualTypeParam != null) {
-                            val qualClass = (qualTypeParam.type.classifierOrNull as? IrClassSymbol)?.owner
-                            if (qualClass != null) QualifierValue.TypeQualifier(qualClass) else null
-                        } else null
+            // (2) Per-qualifier entries discovered via roster. Roster's param names (q_<discriminator>)
+            //     tell us which per-qualifier entry hints to look up. Fixes the klib signature clash for
+            //     multiple same-target-type qualified top-level functions (e.g., Unit-returning inits).
+            val rosterName = KoinModuleFirGenerator.moduleScanFunctionRosterHintName(sanitizedId, defType)
+            val rosterHints = cachedReferenceFunctions(
+                CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, rosterName)
+            )
+            for (rosterSymbol in rosterHints) {
+                val discriminators = rosterSymbol.owner.valueParameters
+                    .map { it.name.asString() }
+                    .filter { it.startsWith(KoinPluginConstants.COMPONENT_SCAN_FUNCTION_ROSTER_PARAM_PREFIX) }
+                    .map { it.removePrefix(KoinPluginConstants.COMPONENT_SCAN_FUNCTION_ROSTER_PARAM_PREFIX) }
+                for (sanitized in discriminators) {
+                    val entryName = KoinModuleFirGenerator.moduleScanFunctionEntryHintName(sanitizedId, defType, sanitized)
+                    val entryHints = cachedReferenceFunctions(
+                        CallableId(KoinModuleFirGenerator.HINTS_PACKAGE, entryName)
+                    )
+                    for (entrySymbol in entryHints) {
+                        addExternalFunctionDefFromHint(entrySymbol.owner, definitionType, defType, definitions, seenKeys)
                     }
                 }
-
-                KoinPluginLogger.debug { "        Found: ${returnTypeClass.name} ($defType) via module-scan function hint" }
-
-                definitions.add(Definition.ExternalFunctionDef(
-                    definitionType = definitionType,
-                    returnTypeClass = returnTypeClass,
-                    bindings = funcBindings,
-                    scopeClass = funcScopeClass,
-                    qualifier = funcQualifier
-                ))
             }
         }
 
@@ -2103,6 +2276,78 @@ class KoinAnnotationProcessor(
         }
 
         return definitions
+    }
+
+    /**
+     * Dedupe key for module-scan definitions: (returnType FQ name, qualifier discriminator).
+     * Uses the same encoding as [qualifierDiscriminator] so TypeQualifier entries are keyed on
+     * FQ name (not simple name) — matches producer-side hint naming and avoids collisions
+     * between same-named qualifier annotations in different packages.
+     */
+    private fun definitionDedupeKey(definition: Definition): String {
+        val returnFq = definition.returnTypeClass.fqNameWhenAvailable?.asString() ?: "?"
+        val qualifier = when (definition) {
+            is Definition.ClassDef -> definition.qualifier
+            is Definition.DslDef -> definition.qualifier
+            is Definition.ExternalFunctionDef -> definition.qualifier
+            is Definition.FunctionDef, is Definition.TopLevelFunctionDef -> null
+        }
+        return "$returnFq#${qualifier?.let { qualifierDiscriminator(it) } ?: ""}"
+    }
+
+    /**
+     * Extract an [Definition.ExternalFunctionDef] from a function-definition hint (either legacy
+     * shared-name overload or per-qualifier entry under roster scheme). Adds it to [definitions]
+     * unless a same-(type, qualifier) entry is already known.
+     *
+     * Hint parameter shape produced by [createHintFunction]:
+     *   - param[0]: contributed (target type)
+     *   - binding* : bound supertypes (optional)
+     *   - scope    : scope class (optional)
+     *   - qualifier_<sanitized> : Unit  (StringQualifier; name carries value)
+     *     OR qualifierType     : TheAnnotation (TypeQualifier)
+     */
+    private fun addExternalFunctionDefFromHint(
+        hintFunc: IrSimpleFunction,
+        definitionType: DefinitionType,
+        defTypeLabel: String,
+        definitions: MutableList<Definition>,
+        seenKeys: MutableSet<String>,
+    ) {
+        val params = hintFunc.valueParameters
+        val contributedType = params.firstOrNull()?.type ?: return
+        val returnTypeClass = (contributedType.classifierOrNull as? IrClassSymbol)?.owner ?: return
+
+        val bindings = params.filter { it.name.asString().startsWith("binding") }
+            .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+        val scopeClass = params.firstOrNull { it.name.asString() == "scope" }
+            ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
+        val qualifier: QualifierValue? = run {
+            val qStringParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
+            if (qStringParam != null) {
+                val raw = KoinPluginConstants.unsanitizeQualifierName(qStringParam.name.asString().removePrefix("qualifier_"))
+                QualifierValue.StringQualifier(raw)
+            } else {
+                val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
+                val qClass = (qTypeParam?.type?.classifierOrNull as? IrClassSymbol)?.owner
+                if (qClass != null) QualifierValue.TypeQualifier(qClass) else null
+            }
+        }
+
+        val candidate = Definition.ExternalFunctionDef(
+            definitionType = definitionType,
+            returnTypeClass = returnTypeClass,
+            bindings = bindings,
+            scopeClass = scopeClass,
+            qualifier = qualifier,
+        )
+        val key = definitionDedupeKey(candidate)
+        if (!seenKeys.add(key)) {
+            KoinPluginLogger.debug { "        (skip dup) ${returnTypeClass.name} ($defTypeLabel) qualifier=${qualifier?.debugString()}" }
+            return
+        }
+        KoinPluginLogger.debug { "        Found: ${returnTypeClass.name} ($defTypeLabel) via module-scan function hint, qualifier=${qualifier?.debugString()}" }
+        definitions.add(candidate)
     }
 
     /** Convert a hint definition type string to [DefinitionType]. */
@@ -2122,6 +2367,22 @@ class KoinAnnotationProcessor(
         return scanPackages.any { scanPkg ->
             defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
         }
+    }
+
+    /**
+     * Pull every value out of a (package → defs) index that lies in any of the scan packages
+     * (exact match or subpackage). Scans the index's key-set rather than the full def list, so
+     * the per-`@Module` cost is O(distinct-packages × scan-packages) instead of O(all-defs).
+     */
+    private fun <T> collectFromPackageIndex(
+        index: Map<String, List<T>>,
+        scanPackages: List<String>
+    ): List<T> {
+        val result = mutableListOf<T>()
+        for ((pkg, defs) in index) {
+            if (matchesScanPackages(pkg, scanPackages)) result.addAll(defs)
+        }
+        return result
     }
 
     /** Resolve effective scan packages: explicit scan packages or default to module's own package. */
@@ -2255,6 +2516,10 @@ class KoinAnnotationProcessor(
         }
 
         val modules = mutableListOf<IrClass>()
+        // Dedup by FqName, not IrClass identity — same logical module reached through two label
+        // hints can resolve to distinct IrClass instances (external stub vs local), and identity
+        // dedup misses that. Matches the fix in KoinStartTransformer.discoverModulesFromHints.
+        val seenFqNames = mutableSetOf<String>()
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
 
         for (label in labels) {
@@ -2264,8 +2529,10 @@ class KoinAnnotationProcessor(
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
                 val paramType = hintFunc.valueParameters.firstOrNull()?.type
-                val moduleClass = (paramType?.classifierOrNull as? IrClassSymbol)?.owner
-                if (moduleClass != null && moduleClass !in modules) {
+                val moduleClass = (paramType?.classifierOrNull as? IrClassSymbol)?.owner ?: continue
+                val fqName = moduleClass.fqNameWhenAvailable?.asString()
+                    ?: "<anon>@${System.identityHashCode(moduleClass)}"
+                if (seenFqNames.add(fqName)) {
                     modules.add(moduleClass)
                 }
             }
@@ -2354,18 +2621,25 @@ class KoinAnnotationProcessor(
             }
         }
 
-        // Single-pass partition of definitions by scope type (avoids 3 separate filter passes)
+        // Single-pass partition of definitions by scope type (avoids 4 separate filter passes).
+        // Routing: typed scope (scopeClass) → typedScoped; named scope (scopeName) → namedScoped;
+        // archetype → archetype; otherwise → root. The four buckets are mutually exclusive — a
+        // definition with `scopeClass == null && scopeName != null` is the KTZ-4039 / #34 case
+        // (`@Scope(name = "session") @Scoped`) that used to silently fall through to root.
         val rootDefinitions = mutableListOf<Definition>()
-        val scopedDefinitions = mutableListOf<Definition>()
+        val typedScopedDefinitions = mutableListOf<Definition>()
+        val namedScopedDefinitions = mutableListOf<Definition>()
         val archetypeDefinitions = mutableListOf<Definition>()
         for (def in definitions) {
             when {
-                def.scopeClass != null -> scopedDefinitions.add(def)
+                def.scopeClass != null -> typedScopedDefinitions.add(def)
+                def.scopeName != null -> namedScopedDefinitions.add(def)
                 def.scopeArchetype != null -> archetypeDefinitions.add(def)
                 else -> rootDefinitions.add(def)
             }
         }
-        val scopeGroups = scopedDefinitions.groupBy { it.scopeClass!! }
+        val scopeGroups = typedScopedDefinitions.groupBy { it.scopeClass!! }
+        val namedScopeGroups = namedScopedDefinitions.groupBy { it.scopeName!! }
         val archetypeGroups = archetypeDefinitions.groupBy { it.scopeArchetype!! }
 
         // Generate root-scope definitions — split into helper functions if too many
@@ -2425,9 +2699,17 @@ class KoinAnnotationProcessor(
             }
         }
 
-        // Generate scope<ScopeClass> { ... } blocks for scoped definitions
+        // Generate scope<ScopeClass> { ... } blocks for typed-scope definitions
         for ((scopeClass, scopeDefs) in scopeGroups) {
             val scopeBlock = buildScopeBlock(scopeClass, scopeDefs, moduleClass, moduleReceiverParam, lambdaFunction, lambdaBuilder, parentFunction)
+            if (scopeBlock != null) {
+                statements.add(scopeBlock)
+            }
+        }
+
+        // Generate scope(named("...")) { ... } blocks for string-named scope definitions (KTZ-4039)
+        for ((scopeName, scopeDefs) in namedScopeGroups) {
+            val scopeBlock = buildNamedScopeBlock(scopeName, scopeDefs, moduleClass, moduleReceiverParam, lambdaFunction, lambdaBuilder, parentFunction)
             if (scopeBlock != null) {
                 statements.add(scopeBlock)
             }
@@ -2461,6 +2743,19 @@ class KoinAnnotationProcessor(
             }
             if (moduleDeclarationIndex >= 0) {
                 putValueArgument(moduleDeclarationIndex, lambdaExpr)
+            }
+
+            // KTZ-4048 / koin#2415 — propagate `@Module(createdAtStart = true)` to the
+            // `module(...)` DSL call. Without this, Kotlin's `module$default` trampoline
+            // substitutes the parameter default (false) regardless of what the user wrote
+            // on the annotation, and the eager-init behavior silently goes missing.
+            if (moduleClass.createdAtStart) {
+                val createdAtStartIndex = moduleDslFunction.valueParameters.indexOfFirst {
+                    it.name.asString() == "createdAtStart"
+                }
+                if (createdAtStartIndex >= 0) {
+                    putValueArgument(createdAtStartIndex, builder.irTrue())
+                }
             }
 
             moduleDslFunction.valueParameters.forEachIndexed { index, param ->
@@ -2655,6 +2950,29 @@ class KoinAnnotationProcessor(
     ): IrExpression? {
         return scopeBlockBuilder.buildScopeBlock(
             scopeClass = scopeClass,
+            moduleReceiver = moduleReceiver,
+            parentLambdaFunction = parentLambdaFunction,
+            builder = builder
+        ) { scopeDslReceiver, scopeLambdaFunction, scopeLambdaBuilder ->
+            buildScopedDefinitions(definitions, moduleClass, scopeDslReceiver, scopeLambdaFunction, scopeLambdaBuilder, parentFunction)
+        }
+    }
+
+    /**
+     * Build: scope(named("name")) { scoped(...) } — string-named scope variant for
+     * `@Scope(name = "...")`. KTZ-4039 / #34.
+     */
+    private fun buildNamedScopeBlock(
+        scopeName: String,
+        definitions: List<Definition>,
+        moduleClass: ModuleClass,
+        moduleReceiver: IrValueParameter,
+        parentLambdaFunction: IrFunction,
+        builder: DeclarationIrBuilder,
+        parentFunction: IrFunction
+    ): IrExpression? {
+        return scopeBlockBuilder.buildNamedScopeBlock(
+            scopeName = scopeName,
             moduleReceiver = moduleReceiver,
             parentLambdaFunction = parentLambdaFunction,
             builder = builder

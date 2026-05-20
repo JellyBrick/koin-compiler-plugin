@@ -1,0 +1,26 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class LaunchersModule : R|kotlin/Any| {
+        public constructor(): R|LaunchersModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Named|(value = String(initWithParam)) @R|org/koin/core/annotation/Singleton|() public final fun initWithParam(@R|org/koin/core/annotation/InjectedParam|() tag: R|kotlin/String|): R|kotlin/Unit| {
+        R|kotlin/check|(==(R|<local>/tag|, String(x)))
+    }
+    @R|org/koin/core/annotation/Named|(value = String(initNoParam)) @R|org/koin/core/annotation/Singleton|() public final fun initNoParam(): R|kotlin/Unit| {
+    }
+    public final fun box(): R|kotlin/String| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|/LaunchersModule.LaunchersModule|().R|/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        R|<local>/koin|.R|org/koin/core/Koin.get|<R|kotlin/Unit|>(R|org/koin/core/qualifier/named|(String(initWithParam)), <L> = get@fun <anonymous>(): R|org/koin/core/parameter/ParametersHolder| <inline=NoInline>  {
+            ^ R|org/koin/core/parameter/parametersOf|(vararg(String(x)))
+        }
+        )
+        R|<local>/koin|.R|org/koin/core/Koin.get|<R|kotlin/Unit|>(R|org/koin/core/qualifier/named|(String(initNoParam)))
+        ^box String(OK)
+    }
+FILE: /launchersModuleModule.kt
+    public final fun R|LaunchersModule|.module(): R|org/koin/core/module/Module|

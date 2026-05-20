@@ -14,3 +14,4 @@ classes/
 yarn.lock
 .kotlin/
 .claude/settings.local.json
+.obsidian

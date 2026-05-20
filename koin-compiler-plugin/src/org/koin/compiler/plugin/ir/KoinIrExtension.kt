@@ -2,6 +2,7 @@ package org.koin.compiler.plugin.ir
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.cli.common.messages.MessageCollector
 import org.jetbrains.kotlin.incremental.components.ExpectActualTracker
 import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
@@ -9,9 +10,29 @@ import org.koin.compiler.plugin.KoinPluginLogger
 
 class KoinIrExtension(
     private val lookupTracker: LookupTracker?,
-    private val expectActualTracker: ExpectActualTracker
+    private val expectActualTracker: ExpectActualTracker,
+    // Captured at construction so the trailing CTA always writes to this compilation's
+    // collector, even if a parallel compilation in the same Gradle daemon has overwritten
+    // the singleton's collector reference by the time we flush.
+    private val messageCollector: MessageCollector,
 ) : IrGenerationExtension {
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
+        // Re-anchor the per-thread collector on this compilation's captured MessageCollector.
+        // Necessary because `KoinPluginLogger.init()` ran on the thread that called
+        // `registerExtensions`, which may differ from the thread running IR generation in
+        // parallel-daemon mode. `InheritableThreadLocal` inherits only at thread creation —
+        // pool workers picked up later won't see init()'s value. Setting here ensures every
+        // diagnostic emitted during this `generate()` lands on the right compilation's
+        // collector even if another compilation's `init()` mutated the shared singleton.
+        KoinPluginLogger.bindThreadCollector(messageCollector)
+        try {
+            generateInternal(moduleFragment, pluginContext)
+        } finally {
+            KoinPluginLogger.unbindThreadCollector()
+        }
+    }
+
+    private fun generateInternal(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
         KoinPluginLogger.debug { "IR Phase starting for module: ${moduleFragment.name}" }
 
         // Phase 0: Generate bodies for FIR-generated hint functions and registry function
@@ -56,6 +77,7 @@ class KoinIrExtension(
         // Instantiate extracted helper classes
         val dslHintGenerator = DslHintGenerator(pluginContext)
         val callSiteValidator = CallSiteValidator(pluginContext)
+        val injectedParamHints = InjectedParamHintGenerator(pluginContext, qualifierExtractor)
 
         // Phase 2.5: Generate DSL definition hints for cross-module discovery
         // Each DSL definition (single<T>, factory<T>, etc.) generates a hint function
@@ -63,6 +85,21 @@ class KoinIrExtension(
         if (dslDefinitions.isNotEmpty() && KoinPluginLogger.compileSafetyEnabled) {
             KoinPluginLogger.debug { "Phase 2.5: Generating ${dslDefinitions.size} DSL definition hints" }
             dslHintGenerator.generateDslDefinitionHints(moduleFragment, dslDefinitions)
+        }
+
+        // Phase 2.6: Generate `@InjectedParam` shape hints for cross-module call-site validation.
+        // Each definition with ≥ 1 `@InjectedParam` slot emits an `injectedparams_<flat-fqn>(...)`
+        // function whose signature mirrors the slot list. Consumer modules read those signatures
+        // to enforce parametersOf(...) shape at call sites (KOIN-D005/D006).
+        if (KoinPluginLogger.compileSafetyEnabled) {
+            val allDefs = mutableListOf<Definition>().apply {
+                addAll(dslDefinitions)
+                addAll(annotationProcessor.getAllKnownDefinitions())
+            }
+            if (allDefs.isNotEmpty()) {
+                KoinPluginLogger.debug { "Phase 2.6: Indexing @InjectedParam shape across ${allDefs.size} definition(s)" }
+                injectedParamHints.generateAndIndexHints(moduleFragment, allDefs)
+            }
         }
 
         // Phase 3: Transform startKoin<T> { } to inject modules()
@@ -93,7 +130,7 @@ class KoinIrExtension(
         // Unresolved call sites (when no full graph) generate call-site hints for deferred validation.
         if (safetyValidator != null && pendingCallSites.isNotEmpty()) {
             KoinPluginLogger.debug { "Phase 3.5: Validating ${pendingCallSites.size} call-site resolutions (graph types: ${safetyValidator.assembledGraphTypes.size})" }
-            callSiteValidator.validatePendingCallSites(moduleFragment, pendingCallSites, safetyValidator.assembledGraphTypes, dslDefinitions, annotationProcessor, dslHintGenerator)
+            callSiteValidator.validatePendingCallSites(moduleFragment, pendingCallSites, safetyValidator.assembledGraphTypes, dslDefinitions, annotationProcessor, dslHintGenerator, injectedParamHints)
         }
 
         // Phase 3.6: Validate call-site hints from dependency modules against known definitions
@@ -125,6 +162,10 @@ class KoinIrExtension(
         val monitorTransformer = KoinMonitorTransformer(pluginContext)
         moduleFragment.transform(monitorTransformer, null)
         monitorTransformer.logSummary()
+
+        // Final: emit one AI-assist CTA at the tail of the log if any Koin diagnostic fired.
+        // Pass our captured collector to dodge the parallel-daemon singleton race.
+        KoinPluginLogger.flushAiAssistCta(messageCollector)
 
         KoinPluginLogger.debug { "IR Phase completed" }
     }

@@ -1,0 +1,59 @@
+FILE: test.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class TestModule : R|kotlin/Any| {
+        public constructor(): R|TestModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public abstract interface UserRepository : R|kotlin/Any| {
+        public abstract fun id(): R|kotlin/String|
+
+    }
+    @R|org/koin/core/annotation/Scope|(name = String(session)) @R|org/koin/core/annotation/Scoped|(binds = <collectionLiteralCall>(<getClass>(Q|UserRepository|))) public final class UserRepositoryImpl : R|UserRepository| {
+        public constructor(): R|UserRepositoryImpl| {
+            super<R|kotlin/Any|>()
+        }
+
+        public open override fun id(): R|kotlin/String| {
+            ^id String(user-impl)
+        }
+
+    }
+    @R|org/koin/core/annotation/Scope|(name = String(session)) @R|org/koin/core/annotation/Scoped|() public final class SessionData : R|kotlin/Any| {
+        public constructor(token: R|kotlin/String| = String(session-token)): R|SessionData| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val token: R|kotlin/String| = R|<local>/token|
+            public get(): R|kotlin/String|
+
+    }
+    public final fun box(): R|kotlin/String| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|/TestModule.TestModule|().R|/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        lval session1: R|org/koin/core/scope/Scope| = R|<local>/koin|.R|org/koin/core/Koin.createScope|(String(s1), R|org/koin/core/qualifier/named|(String(session)))
+        lval session2: R|org/koin/core/scope/Scope| = R|<local>/koin|.R|org/koin/core/Koin.createScope|(String(s2), R|org/koin/core/qualifier/named|(String(session)))
+        lval repoA: R|UserRepository| = R|<local>/session1|.R|org/koin/core/scope/Scope.get|<R|UserRepository|>()
+        lval repoB: R|UserRepository| = R|<local>/session1|.R|org/koin/core/scope/Scope.get|<R|UserRepository|>()
+        lval repoC: R|UserRepository| = R|<local>/session2|.R|org/koin/core/scope/Scope.get|<R|UserRepository|>()
+        lval dataA: R|SessionData| = R|<local>/session1|.R|org/koin/core/scope/Scope.get|<R|SessionData|>()
+        lval dataB: R|SessionData| = R|<local>/session1|.R|org/koin/core/scope/Scope.get|<R|SessionData|>()
+        R|<local>/session1|.R|org/koin/core/scope/Scope.close|()
+        R|<local>/session2|.R|org/koin/core/scope/Scope.close|()
+        lval sameWithinScope: R|kotlin/Boolean| = ===(R|<local>/repoA|, R|<local>/repoB|) && ===(R|<local>/dataA|, R|<local>/dataB|)
+        lval differentAcrossScopes: R|kotlin/Boolean| = !==(R|<local>/repoA|, R|<local>/repoC|)
+        lval boundToInterface: R|kotlin/Boolean| = (R|<local>/repoA| is R|UserRepositoryImpl|) && ==(R|<local>/repoA|.R|/UserRepositoryImpl.id|(), String(user-impl))
+        ^box when () {
+            R|<local>/sameWithinScope| && R|<local>/differentAcrossScopes| && R|<local>/boundToInterface| ->  {
+                String(OK)
+            }
+            else ->  {
+                <strcat>(String(FAIL: sameWithinScope=), R|<local>/sameWithinScope|, String( differentAcrossScopes=), R|<local>/differentAcrossScopes|, String( boundToInterface=), R|<local>/boundToInterface|)
+            }
+        }
+
+    }
+FILE: /testModuleModule.kt
+    public final fun R|TestModule|.module(): R|org/koin/core/module/Module|

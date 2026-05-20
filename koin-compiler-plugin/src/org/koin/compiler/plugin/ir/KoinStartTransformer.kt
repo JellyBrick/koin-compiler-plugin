@@ -93,6 +93,20 @@ class KoinStartTransformer(
     // Module function resolver (multi-strategy lookup for module() extension functions)
     private val moduleFunctionResolver = ModuleFunctionResolver(context, moduleFragment)
 
+    // Per-compile caches. The annotation walk and the full-IR scan in
+    // `discoverLocalConfigurationModules` are both invariant for a given (appClass, labels)
+    // and frequently re-asked: every typed `startKoin<T>()` / `koinApplication<T>()` site
+    // hits them, and test-apps routinely has ~9 such entry points per compile.
+    //
+    // Keyed by FqName (not IrClass identity) so the same logical app class resolved through
+    // two symbol paths still hits the cache. Falls back to a stable synthetic string when
+    // FqName is unavailable so the cache never collapses unrelated anonymous classes.
+    private val moduleClassesByApp = mutableMapOf<String, List<IrClass>>()
+    private val configModulesByLabels = mutableMapOf<Set<String>, List<IrClass>>()
+
+    private fun appClassCacheKey(appClass: IrClass): String =
+        appClass.fqNameWhenAvailable?.asString() ?: "<anon>@${System.identityHashCode(appClass)}"
+
     override fun visitCall(expression: IrCall): IrExpression {
         val callee = expression.symbol.owner
         val calleeFqName = callee.fqNameWhenAvailable
@@ -139,9 +153,37 @@ class KoinStartTransformer(
         // Mark generic versions as entry points too
         hasKoinEntryPoint = true
 
-        // Verify this is the generic version (has type parameter)
-        // The implementation functions (startKoinWith, koinApplicationWith) have no type parameters
+        // Untyped variants — `startKoin { modules(A::class) }`, `koinApplication { modules(...) }`,
+        // and especially the Compose Composable-friendly `koinConfiguration { modules(...) }`
+        // (issue #38 / KTZ-4037) — don't have a `<T>` type parameter to drive `@KoinApplication`
+        // discovery, but they DO carry the module list directly inside the trailing lambda. Walk
+        // the lambda for `KoinApplication.modules(vararg KClass)` calls and route the result
+        // through A3 so the bare-config entry point gets the same full-graph validation as the
+        // typed entry point.
         if (callee.typeParameters.isEmpty()) {
+            val lambdaModuleClasses = collectModuleClassesFromLambda(expression)
+            if (lambdaModuleClasses.isNotEmpty() && safetyValidator != null && annotationProcessor != null) {
+                val startKoinFile = currentFile
+                for (moduleClass in lambdaModuleClasses) {
+                    trackClassLookup(lookupTracker, startKoinFile, moduleClass)
+                    linkDeclarationsForIC(expectActualTracker, startKoinFile, moduleClass)
+                }
+                val entryName = when {
+                    isStartKoin -> "startKoin { … }"
+                    isKoinApplication -> "koinApplication { … }"
+                    isKoinConfiguration -> "koinConfiguration { … }"
+                    isWithConfiguration -> "withConfiguration { … }"
+                    else -> "<unknown-entry>"
+                }
+                safetyValidator.validateFullGraph(
+                    entryName,
+                    lambdaModuleClasses,
+                    annotationProcessor.collectedModuleClasses,
+                    annotationProcessor::getDefinitionsForModule,
+                    annotationProcessor::getDefinitionsForDependencyModule,
+                    dslDefinitions
+                )
+            }
             return super.visitCall(expression)
         }
 
@@ -272,7 +314,10 @@ class KoinStartTransformer(
      * - @KoinApplication(configurations = ["test"]) → only @Configuration("test") modules
      * - @KoinApplication() or @KoinApplication(configurations = []) → only @Configuration() (default) modules
      */
-    private fun extractModulesFromKoinApplicationAnnotation(appClass: IrClass): List<IrClass> {
+    private fun extractModulesFromKoinApplicationAnnotation(appClass: IrClass): List<IrClass> =
+        moduleClassesByApp.getOrPut(appClassCacheKey(appClass)) { computeModuleClasses(appClass) }
+
+    private fun computeModuleClasses(appClass: IrClass): List<IrClass> {
         val explicitModules = extractExplicitModules(appClass)
         val configurationLabels = extractConfigurationLabels(appClass)
 
@@ -281,11 +326,24 @@ class KoinStartTransformer(
         // Discover modules filtered by configuration labels
         val discoveredModules = discoverConfigurationModules(configurationLabels)
 
-        // Combine explicit modules with auto-discovered @Configuration modules
-        val allModules = (explicitModules + discoveredModules)
-            .distinctBy { it.fqNameWhenAvailable }
+        // Koin is last-wins at runtime, so load order determines override precedence.
+        //
+        // Rule (#2402): auto-discovered @Configuration modules first, explicit
+        // @KoinApplication(modules = [...]) last. That way an app module listing a
+        // feature override wins over the discovered dependency, which matches the
+        // typical intent of "the app customises the libraries, not the other way round".
+        //
+        // Within each half we preserve the user's declaration order so they can still
+        // control fine-grained order via an explicit list (modules = [A, B, C] loads
+        // A then B then C, and C wins among those three).
+        //
+        // Dedupe discovered AGAINST explicit (not the other way round) so a module the
+        // user re-declares in the explicit list keeps its explicit position — and
+        // therefore its explicit override priority.
+        val explicitFqNames = explicitModules.mapNotNull { it.fqNameWhenAvailable }.toSet()
+        val uniqueDiscovered = discoveredModules.filterNot { it.fqNameWhenAvailable in explicitFqNames }
 
-        return allModules
+        return uniqueDiscovered + explicitModules
     }
 
     /**
@@ -334,11 +392,12 @@ class KoinStartTransformer(
      * Discover @Configuration modules filtered by configuration labels.
      * Combines local modules and modules from hint functions.
      */
-    private fun discoverConfigurationModules(labels: List<String>): List<IrClass> {
-        val localModules = discoverLocalConfigurationModules(labels)
-        val hintModules = discoverModulesFromHints(labels)
-        return (localModules + hintModules).distinctBy { it.fqNameWhenAvailable }
-    }
+    private fun discoverConfigurationModules(labels: List<String>): List<IrClass> =
+        configModulesByLabels.getOrPut(labels.toSet()) {
+            val localModules = discoverLocalConfigurationModules(labels)
+            val hintModules = discoverModulesFromHints(labels)
+            (localModules + hintModules).distinctBy { it.fqNameWhenAvailable }
+        }
 
     /**
      * Extract explicitly listed modules from @KoinApplication(modules = [...])
@@ -369,25 +428,41 @@ class KoinStartTransformer(
 
     /**
      * Discover @Configuration modules in the current compilation unit.
-     * Filters by configuration labels - a module is included if it has ANY of the requested labels.
+     * Filters by configuration labels — a module is included if it has ANY of the requested labels.
+     *
+     * Reuses [KoinAnnotationProcessor.collectedModuleClasses] from Phase 1 instead of doing a
+     * second `moduleFragment.acceptChildrenVoid` pass. The annotation processor already walked
+     * every IrClass in this fragment and recorded every `@Module`; re-walking solely to filter
+     * for `@Configuration` doubled the cost for what amounted to a list filter. The Phase 1
+     * collection is invariant for the rest of IR generation, so consuming it here is safe.
+     *
+     * Fallback: when no annotation processor is wired (bare-CLI / test paths that instantiate
+     * KoinStartTransformer without one), do the old IR walk so behavior stays correct.
      *
      * @param labels Configuration labels to filter by
      */
     private fun discoverLocalConfigurationModules(labels: List<String>): List<IrClass> {
-        val modules = mutableListOf<IrClass>()
-
-        moduleFragment.acceptChildrenVoid(object : IrVisitorVoid() {
-            override fun visitElement(element: IrElement) {
-                element.acceptChildrenVoid(this)
-            }
-
-            override fun visitClass(declaration: IrClass) {
-                if (hasConfigurationWithMatchingLabels(declaration, labels)) {
-                    modules.add(declaration)
+        val processor = annotationProcessor
+        val modules: List<IrClass> = if (processor != null) {
+            processor.collectedModuleClasses
+                .map { it.irClass }
+                .filter { hasConfigurationWithMatchingLabels(it, labels) }
+        } else {
+            val collected = mutableListOf<IrClass>()
+            moduleFragment.acceptChildrenVoid(object : IrVisitorVoid() {
+                override fun visitElement(element: IrElement) {
+                    element.acceptChildrenVoid(this)
                 }
-                super.visitClass(declaration)
-            }
-        })
+
+                override fun visitClass(declaration: IrClass) {
+                    if (hasConfigurationWithMatchingLabels(declaration, labels)) {
+                        collected.add(declaration)
+                    }
+                    super.visitClass(declaration)
+                }
+            })
+            collected
+        }
 
         KoinPluginLogger.debug { "  -> Found ${modules.size} local @Configuration modules matching labels $labels" }
         return modules
@@ -402,6 +477,10 @@ class KoinStartTransformer(
      */
     private fun discoverModulesFromHints(labels: List<String>): List<IrClass> {
         val modules = mutableListOf<IrClass>()
+        // Dedup by FqName rather than IrClass identity — the same logical module reached via
+        // two label hints can resolve to distinct IrClass instances (external stub vs. local),
+        // and `moduleClass !in modules` (list contains, identity) would miss that.
+        val seenFqNames = mutableSetOf<String>()
 
         try {
             for (label in labels) {
@@ -413,9 +492,11 @@ class KoinStartTransformer(
                 for (hintFuncSymbol in hintFunctions) {
                     val hintFunc = hintFuncSymbol.owner
                     val paramType = hintFunc.valueParameters.firstOrNull()?.type
-                    val moduleClass = (paramType?.classifierOrNull as? IrClassSymbol)?.owner
-                    if (moduleClass != null && moduleClass !in modules) {
-                        KoinPluginLogger.debug { "  -> Found hint module: ${moduleClass.fqNameWhenAvailable} (label=$label)" }
+                    val moduleClass = (paramType?.classifierOrNull as? IrClassSymbol)?.owner ?: continue
+                    val fqName = moduleClass.fqNameWhenAvailable?.asString()
+                        ?: "<anon>@${System.identityHashCode(moduleClass)}"
+                    if (seenFqNames.add(fqName)) {
+                        KoinPluginLogger.debug { "  -> Found hint module: $fqName (label=$label)" }
                         modules.add(moduleClass)
                     }
                 }
@@ -449,6 +530,71 @@ class KoinStartTransformer(
             is IrGetClass -> (expression.argument.type.classifierOrNull as? IrClassSymbol)?.owner
             else -> null
         }
+    }
+
+    /**
+     * Recursively walk a `startKoin { … }` / `koinApplication { … }` / `koinConfiguration { … }`
+     * trailing lambda and return the union of every `IrClass` reachable via
+     * `KoinApplication.modules(vararg KClass)` calls inside.
+     *
+     * The walk handles Compose's IR-plugin scaffolding the same way [KoinDSLTransformer.findParametersOfCall]
+     * does — Compose Composables wrap user lambdas in `sourceInformationMarkerStart` +
+     * `remember { ... }` + `IrVariable` initializers, so the literal `IrFunctionExpression`
+     * argument shape can't be assumed. Descending through `IrCall` / `IrFunctionExpression` /
+     * `IrFunctionReference` / `IrBlockBody` / `IrContainerExpression` / `IrReturn` /
+     * `IrVariable` / `IrTypeOperatorCall` / `IrSetValue` cuts through the scaffolding
+     * regardless of the exact shape.
+     *
+     * Used by the untyped-entry A3 path (KTZ-4037 / #38) — without a `<T>` type parameter we
+     * can't get modules from `@KoinApplication(modules = [...])`, but the user's `modules(...)`
+     * call inside the lambda gives us the same list at the IR level.
+     */
+    private fun collectModuleClassesFromLambda(call: IrCall): List<IrClass> {
+        val result = LinkedHashSet<IrClass>()
+        // Identity-based visited set — IrFunctionReference resolves to a function whose body
+        // may be revisited from elsewhere in the tree (Compose `remember` scaffolding, captured
+        // lambdas, etc.). Without a guard, pathological IR with cycles would recurse forever
+        // and benign cases would re-walk the same subtree once per visit.
+        val visited = java.util.IdentityHashMap<IrElement, Unit>()
+
+        fun visit(node: IrElement?) {
+            if (node == null) return
+            if (visited.put(node, Unit) != null) return
+            if (node is IrCall) {
+                val nc = node.symbol.owner
+                val ncFq = nc.fqNameWhenAvailable?.asString()
+                val isModulesCall = ncFq == "org.koin.plugin.module.dsl.modules" &&
+                    nc.extensionReceiverParameter?.type?.classFqName?.asString() == "org.koin.core.KoinApplication" &&
+                    nc.valueParameters.size == 1 &&
+                    nc.valueParameters[0].varargElementType != null
+                if (isModulesCall) {
+                    val varargArg = node.getValueArgument(0) as? IrVararg
+                    varargArg?.elements?.forEach { element ->
+                        val cls = when (element) {
+                            is IrClassReference -> (element.classType.classifierOrNull as? IrClassSymbol)?.owner
+                            is IrExpression -> extractClassFromKClassExpression(element)
+                            else -> null
+                        }
+                        if (cls != null) result.add(cls)
+                    }
+                }
+                for (i in 0 until node.valueArgumentsCount) visit(node.getValueArgument(i))
+                visit(node.dispatchReceiver)
+                visit(node.extensionReceiver)
+                return
+            }
+            if (node is IrFunctionExpression) { visit(node.function.body); return }
+            if (node is IrFunctionReference) { visit((node.symbol.owner as? IrSimpleFunction)?.body); return }
+            if (node is IrBlockBody) { node.statements.forEach { visit(it) }; return }
+            if (node is IrContainerExpression) { node.statements.forEach { visit(it) }; return }
+            if (node is IrReturn) { visit(node.value); return }
+            if (node is IrVariable) { visit(node.initializer); return }
+            if (node is IrTypeOperatorCall) { visit(node.argument); return }
+            if (node is IrSetValue) { visit(node.value); return }
+        }
+
+        for (i in 0 until call.valueArgumentsCount) visit(call.getValueArgument(i))
+        return result.toList()
     }
 
     /**

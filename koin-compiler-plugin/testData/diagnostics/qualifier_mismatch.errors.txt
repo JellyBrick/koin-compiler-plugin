@@ -1,4 +1,4 @@
-[Koin] Missing dependency: Repository qualified with @Named("prod")
+[Koin][KOIN-D001] Missing dependency: Repository qualified with @Named("prod")
   required by: Service (parameter 'repo')
   in module: TestModule
   Hint: Found similar binding: Repository with qualifier @Named("test")

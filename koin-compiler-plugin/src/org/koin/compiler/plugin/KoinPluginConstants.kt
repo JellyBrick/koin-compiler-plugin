@@ -27,6 +27,26 @@ object KoinPluginConstants {
     /** Option to enable compile-time dependency safety checks. */
     const val OPTION_COMPILE_SAFETY = "compileSafety"
 
+    /** Option to append a single AI-assist CTA at the end of compilation if any Koin diagnostic fires. */
+    const val OPTION_AI_ASSIST = "aiAssist"
+
+    /**
+     * Option carrying a stable, Gradle-module-unique identifier (typically `project.path`).
+     * Used as the leading segment of synthetic hint file names so that two Gradle modules
+     * producing hints for the same target type don't collide at dex merge time.
+     * Falls back to the FIR module-data name when absent.
+     */
+    const val OPTION_MODULE_ID = "moduleId"
+
+    /**
+     * URL printed in the AI-assist CTA.
+     *
+     * Short redirect to the canonical doc page at https://doc.kotzilla.io/docs/fixIssues/koinMcp.
+     * Pinned by [org.koin.compiler.plugin.KoinDiagnosticTest] — changing this string is a public
+     * contract change and must be coordinated with the redirect on kotzilla.io.
+     */
+    const val AI_ASSIST_CTA_URL = "https://kotzilla.io/koin-mcp"
+
     // ================================================================================
     // Definition Types - Used for hint functions and logging
     // ================================================================================
@@ -77,11 +97,32 @@ object KoinPluginConstants {
     /** Prefix for module-scoped component scan function hint functions (e.g., componentscanfunc_comExampleCoreModule_single). */
     const val COMPONENT_SCAN_FUNCTION_HINT_PREFIX = "componentscanfunc_"
 
+    /** Prefix for roster-hint parameter names that enumerate per-qualifier entries (e.g., q_initFlagsAndLogging). */
+    const val COMPONENT_SCAN_FUNCTION_ROSTER_PARAM_PREFIX = "q_"
+
     /** Prefix for per-function definition hints inside @Module classes (e.g., moduledef_comExampleDaosModule_providesTopicDao). */
     const val MODULE_DEFINITION_HINT_PREFIX = "moduledef_"
 
     /** Prefix for DSL definition hints (e.g., dsl_single, dsl_factory). */
     const val DSL_DEFINITION_HINT_PREFIX = "dsl_"
+
+    /**
+     * Prefix for `@InjectedParam` shape hints (e.g., `injectedparams_com_example_A`).
+     * The hint function's signature carries the shape: each `@InjectedParam` slot becomes a
+     * value parameter with the slot's type and nullability. Consumers read arity/types/nullability
+     * directly from `IrFunction.valueParameters`. Used by KOIN-D005/D006 to validate
+     * `parametersOf(...)` at `get<T>()` / `inject<T>()` / `koinInject<T>()` call sites
+     * across module boundaries.
+     */
+    const val INJECTED_PARAMS_HINT_PREFIX = "injectedparams_"
+
+    /**
+     * Flatten an FqName (dots → underscores) into a Kotlin-identifier-safe segment usable as
+     * the suffix of an [INJECTED_PARAMS_HINT_PREFIX] hint function name. `$` (nested-class
+     * separator in some FqName renderings) also collapses to `_`.
+     */
+    fun flattenFqNameForHint(fqName: String): String =
+        fqName.replace('.', '_').replace('$', '_')
 
     /** Function name for qualifier annotation hint functions (e.g., qualifier). */
     const val QUALIFIER_HINT_NAME = "qualifier"
@@ -104,4 +145,64 @@ object KoinPluginConstants {
 
     /** Name of the generated module extension function. */
     const val MODULE_FUNCTION_NAME = "module"
+
+    // ================================================================================
+    // Qualifier Name Encoding — for embedding qualifier strings in Kotlin identifiers
+    // ================================================================================
+
+    /**
+     * Sanitize a qualifier name for use in a Kotlin identifier (hint parameter name).
+     *
+     * Characters not valid in Kotlin identifiers are escaped as `$XX` where XX is
+     * the lowercase 2-digit hex code of the character. Literal `$` is escaped as `$$`.
+     *
+     * Example: `"my.service-1"` → `"my$2eservice$2d1"`
+     */
+    fun sanitizeQualifierName(name: String): String = buildString(name.length) {
+        for (ch in name) {
+            when {
+                ch == '$' -> append("$$")
+                ch.isLetterOrDigit() || ch == '_' -> append(ch)
+                else -> {
+                    append('$')
+                    append(ch.code.toString(16).padStart(2, '0'))
+                }
+            }
+        }
+    }
+
+    /**
+     * Reverse [sanitizeQualifierName]: decode a sanitized identifier back to the original
+     * qualifier name.
+     *
+     * Example: `"my$2eservice$2d1"` → `"my.service-1"`
+     */
+    fun unsanitizeQualifierName(encoded: String): String = buildString(encoded.length) {
+        var i = 0
+        while (i < encoded.length) {
+            val ch = encoded[i]
+            if (ch == '$' && i + 1 < encoded.length) {
+                if (encoded[i + 1] == '$') {
+                    append('$')
+                    i += 2
+                } else if (i + 2 < encoded.length) {
+                    val hex = encoded.substring(i + 1, i + 3)
+                    val code = hex.toIntOrNull(16)
+                    if (code != null) {
+                        append(code.toChar())
+                        i += 3
+                    } else {
+                        append(ch)
+                        i++
+                    }
+                } else {
+                    append(ch)
+                    i++
+                }
+            } else {
+                append(ch)
+                i++
+            }
+        }
+    }
 }

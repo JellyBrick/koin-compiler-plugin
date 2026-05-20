@@ -10,6 +10,8 @@ import org.jetbrains.kotlin.ir.UNDEFINED_OFFSET
 import org.jetbrains.kotlin.ir.builders.irCall
 import org.jetbrains.kotlin.ir.builders.irGet
 import org.jetbrains.kotlin.ir.builders.irNull
+import org.jetbrains.kotlin.ir.builders.irString
+import org.jetbrains.kotlin.ir.types.isString
 import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
 import org.jetbrains.kotlin.ir.declarations.IrFunction
@@ -67,6 +69,12 @@ class ScopeBlockBuilder(
         context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.KCLASS))?.owner
     }
 
+    // `org.koin.core.qualifier.named(String)` — used for string-named `@Scope(name = "...")`.
+    private val namedFunctionSymbol by lazy {
+        context.referenceFunctions(CallableId(KoinAnnotationFqNames.QUALIFIER_PACKAGE, Name.identifier("named")))
+            .firstOrNull { it.owner.valueParameters.size == 1 && it.owner.valueParameters[0].type.isString() }
+    }
+
     private val koinModuleFqName = KoinAnnotationFqNames.KOIN_MODULE
 
     /**
@@ -108,6 +116,44 @@ class ScopeBlockBuilder(
         if (qualifierCall == null) {
             KoinPluginLogger.debug { "Failed to create type qualifier for ${scopeClass.name}" }
             return null
+        }
+
+        return builder.irCall(scopeDslFunction.symbol).apply {
+            extensionReceiver = builder.irGet(moduleReceiver)
+            putValueArgument(0, qualifierCall)
+            putValueArgument(1, scopeLambdaResult.expression)
+        }
+    }
+
+    /**
+     * Build `scope(named("name")) { ... }` for the string-named `@Scope(name = "...")` variant.
+     * Mirrors [buildScopeBlock] but uses `org.koin.core.qualifier.named(String)` as the qualifier
+     * instead of `typeQualifier<ScopeClass>()`. KTZ-4039 / #34.
+     */
+    fun buildNamedScopeBlock(
+        scopeName: String,
+        moduleReceiver: IrValueParameter,
+        parentLambdaFunction: IrFunction,
+        builder: DeclarationIrBuilder,
+        statementsBuilder: (scopeDslReceiver: IrValueParameter, parentFunction: IrFunction, lambdaBuilder: DeclarationIrBuilder) -> List<IrStatement>
+    ): IrExpression? {
+        val scopeDslFunction = findScopeFunction() ?: run {
+            KoinPluginLogger.debug { "scope() function not found - named scope block for \"$scopeName\" skipped" }
+            return null
+        }
+        val namedFunc = namedFunctionSymbol?.owner ?: run {
+            KoinPluginLogger.debug { "named(String) function not found - named scope block for \"$scopeName\" skipped" }
+            return null
+        }
+
+        val scopeLambdaResult = createScopeLambda(parentLambdaFunction, statementsBuilder)
+            ?: run {
+                KoinPluginLogger.debug { "Failed to create scope lambda for named scope \"$scopeName\" - ScopeDSL class missing" }
+                return null
+            }
+
+        val qualifierCall = builder.irCall(namedFunc.symbol).apply {
+            putValueArgument(0, builder.irString(scopeName))
         }
 
         return builder.irCall(scopeDslFunction.symbol).apply {

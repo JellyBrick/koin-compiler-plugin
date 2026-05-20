@@ -36,6 +36,7 @@ import org.jetbrains.kotlin.fir.toFirResolvedTypeRef
 import org.jetbrains.kotlin.types.ConstantValueKind
 
 import org.jetbrains.kotlin.KtPsiSourceElement
+import com.intellij.psi.PsiElement
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
@@ -81,6 +82,26 @@ import org.koin.compiler.plugin.KoinPluginConstants
  * The hint functions allow downstream modules to discover @Configuration modules from dependencies
  * by querying the `org.koin.plugin.hints` package via FIR's symbolProvider.
  */
+/**
+ * Defensive accessor for [KtPsiSourceElement.psi] — returns `null` if `getPsi()`
+ * isn't present at runtime instead of letting the [LinkageError] (typically
+ * [NoSuchMethodError]) bubble up and abort FIR file analysis.
+ *
+ * Background (issue #29 — kapt/Hilt coexistence): when the Koin compiler plugin is
+ * loaded into a build that also runs kapt (Hilt, Dagger, Room, etc.), kapt's stub
+ * generator can put a Kotlin compiler with a divergent `KtPsiSourceElement` ABI on
+ * the classpath. Our compiled bytecode resolves `psi` to a fixed JVM signature
+ * (`getPsi()` → `PsiElement`); when the runtime class doesn't expose that exact
+ * method, `NoSuchMethodError` fires inside file analysis and the user sees a
+ * `FileAnalysisException` they can't act on. Returning `null` here lets each call
+ * site fall back to the existing synthetic-file-name path.
+ */
+private fun KtPsiSourceElement.psiOrNull(): PsiElement? = try {
+    psi
+} catch (_: LinkageError) {
+    null
+}
+
 @OptIn(SymbolInternals::class, ExperimentalTopLevelDeclarationsGenerationApi::class, org.jetbrains.kotlin.fir.declarations.DirectDeclarationsAccess::class)
 class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExtension(session) {
 
@@ -90,6 +111,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         private val CONFIGURATION_ANNOTATION = KoinAnnotationFqNames.CONFIGURATION
 
         // Definition annotations
+        private val ALL_DEFINITION_ANNOTATIONS = KoinAnnotationFqNames.KOIN_DEFINITION_ANNOTATIONS.toSet()
         private val SINGLETON_ANNOTATION = KoinAnnotationFqNames.SINGLETON
         private val SINGLE_ANNOTATION = KoinAnnotationFqNames.SINGLE
         private val FACTORY_ANNOTATION = KoinAnnotationFqNames.FACTORY
@@ -266,6 +288,28 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
             if (defType !in ALL_DEFINITION_TYPES) return null
             return moduleId to defType
         }
+
+        /**
+         * Per-qualifier entry hint name for a top-level @ComponentScan-discovered function that has
+         * a qualifier. Unique per (moduleId, defType, qualifier), so IR signatures never clash even
+         * when target types coincide (e.g. two Unit-returning @Named @Singleton init functions).
+         *
+         * Example: ("com_example_AppModule", "single", "initFlagsAndLogging")
+         *   -> "componentscanfunc_com_example_AppModule_single__q_initFlagsAndLogging"
+         */
+        fun moduleScanFunctionEntryHintName(moduleId: String, defType: String, sanitizedQualifier: String): Name =
+            Name.identifier("$COMPONENT_SCAN_FUNCTION_HINT_PREFIX${moduleId}_${defType}__q_$sanitizedQualifier")
+
+        /**
+         * Roster hint name for a given (moduleId, defType). The roster's parameter names enumerate
+         * the sanitized qualifiers that have per-qualifier entry hints. Consumer reads this to
+         * discover what qualified definitions the module contributes, then looks up each entry.
+         *
+         * Example: ("com_example_AppModule", "single")
+         *   -> "componentscanfunc_com_example_AppModule_single__roster"
+         */
+        fun moduleScanFunctionRosterHintName(moduleId: String, defType: String): Name =
+            Name.identifier("$COMPONENT_SCAN_FUNCTION_HINT_PREFIX${moduleId}_${defType}__roster")
 
         /**
          * Build hint function name for a per-function definition inside a @Module class.
@@ -472,8 +516,50 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         extractScopeClassIdFromAnnotations(classSymbol.fir.annotations.filterIsInstance<FirAnnotationCall>())
 
     /**
+     * Extract explicit binding ClassIds from @Single(binds = [...]) and related definition annotations.
+     * Null means the binds parameter was omitted, while an empty list means it was explicitly present
+     * but empty/defaulted, so auto-binding should be suppressed.
+     */
+    private fun extractExplicitBindingClassIdsFromAnnotations(annotations: List<FirAnnotationCall>): List<ClassId>? {
+        val annotation = annotations.firstOrNull { annotation ->
+            val annotationClassId = annotation.annotationTypeRef.coneTypeOrNull?.classId
+            annotationClassId?.asSingleFqName() in ALL_DEFINITION_ANNOTATIONS
+        } ?: return null
+
+        val bindings = mutableListOf<ClassId>()
+        var foundBindsArgument = false
+
+        for (argument in annotation.argumentList.arguments) {
+            if (argument is FirVarargArgumentsExpression) {
+                foundBindsArgument = true
+                for (element in argument.arguments) {
+                    val classId = extractClassIdFromExpression(element)
+                    if (classId != null && classId.asSingleFqName().asString() != "kotlin.Unit") {
+                        bindings.add(classId)
+                    }
+                }
+            }
+        }
+
+        return if (foundBindsArgument) bindings else null
+    }
+
+    private fun extractExplicitBindingClassIds(functionSymbol: FirNamedFunctionSymbol): List<ClassId>? =
+        extractExplicitBindingClassIdsFromAnnotations(functionSymbol.fir.annotations.filterIsInstance<FirAnnotationCall>())
+
+    private fun extractExplicitBindingClassIds(classSymbol: FirClassSymbol<*>): List<ClassId>? =
+        extractExplicitBindingClassIdsFromAnnotations(classSymbol.fir.annotations.filterIsInstance<FirAnnotationCall>())
+
+    /**
      * Detect auto-binding ClassIds from the return type's supertypes.
      * Filters out kotlin.Any and only includes interfaces and abstract classes.
+     *
+     * When a supertype — direct OR transitive — is a `kotlin.coroutines.SuspendFunctionN`,
+     * emits KOIN-D007 (blocks the build) and excludes the affected direct supertype from the
+     * returned bindings. Suspend function injection isn't supported by Koin runtime yet, and
+     * shipping a half-wired definition is worse than failing the compile. We walk the full
+     * supertype closure because the suspend ancestor can be hidden behind an intermediate
+     * interface (e.g. `class Impl : MyApi` where `interface MyApi : suspend (P) -> R`).
      */
     private fun detectBindingClassIds(returnTypeClassId: ClassId): List<ClassId> {
         val classSymbol = session.symbolProvider.getClassLikeSymbolByClassId(returnTypeClassId) ?: return emptyList()
@@ -485,6 +571,17 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                 val superClassId = superTypeRef.coneType.classId ?: continue
                 val superFqName = superClassId.asSingleFqName().asString()
                 if (superFqName == "kotlin.Any") continue
+
+                if (isSuspendFunctionClassId(superClassId)) {
+                    reportUnsupportedSuspendBinding(returnTypeClassId, superClassId)
+                    continue
+                }
+
+                val transitiveSuspend = findTransitiveSuspendSupertype(superClassId)
+                if (transitiveSuspend != null) {
+                    reportUnsupportedSuspendBinding(returnTypeClassId, transitiveSuspend)
+                    continue
+                }
 
                 // Check if the supertype is an interface or abstract class
                 val superSymbol = session.symbolProvider.getClassLikeSymbolByClassId(superClassId)
@@ -501,6 +598,62 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         }
         return bindings
     }
+
+    /**
+     * Walk the transitive supertype closure of [startClassId] and return the first
+     * `kotlin.coroutines.SuspendFunctionN` ClassId found, or null if none.
+     *
+     * Visited-set guarded — diamond inheritance and self-referential bounds are common
+     * enough in real code (e.g. `interface A<T : A<T>>`) that a naive walk would loop.
+     */
+    private fun findTransitiveSuspendSupertype(startClassId: ClassId): ClassId? {
+        val visited = mutableSetOf<ClassId>()
+        val stack = ArrayDeque<ClassId>()
+        stack.addLast(startClassId)
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            if (!visited.add(current)) continue
+            val symbol = session.symbolProvider.getClassLikeSymbolByClassId(current) ?: continue
+            if (symbol !is FirClassSymbol<*>) continue
+            for (ref in symbol.resolvedSuperTypeRefs) {
+                val parentId = ref.coneType.classId ?: continue
+                if (parentId.asSingleFqName().asString() == "kotlin.Any") continue
+                if (isSuspendFunctionClassId(parentId)) return parentId
+                stack.addLast(parentId)
+            }
+        }
+        return null
+    }
+
+    /**
+     * True if [classId] is one of `kotlin.coroutines.SuspendFunction0` … `SuspendFunction22`.
+     * Package check + name prefix is enough; no need to look up the symbol.
+     */
+    private fun isSuspendFunctionClassId(classId: ClassId): Boolean {
+        if (classId.packageFqName.asString() != "kotlin.coroutines") return false
+        val name = classId.shortClassName.asString()
+        if (!name.startsWith("SuspendFunction")) return false
+        val arity = name.removePrefix("SuspendFunction").toIntOrNull() ?: return false
+        return arity in 0..22
+    }
+
+    /**
+     * Emit KOIN-D007 for a definition whose binding type extends a suspend function type.
+     * Each (target, suspendType) pair is reported at most once per compilation to avoid
+     * duplicate noise when a definition is reached from multiple discovery passes.
+     */
+    private fun reportUnsupportedSuspendBinding(targetClassId: ClassId, suspendClassId: ClassId) {
+        val key = "${targetClassId.asSingleFqName()}|${suspendClassId.asSingleFqName()}"
+        if (!reportedSuspendBindings.add(key)) return
+        KoinPluginLogger.report(
+            org.koin.compiler.plugin.KoinDiagnostic.UnsupportedSuspendBinding(
+                target = targetClassId.asSingleFqName().asString(),
+                suspendType = suspendClassId.asSingleFqName().asString(),
+            )
+        )
+    }
+
+    private val reportedSuspendBindings: MutableSet<String> = mutableSetOf()
 
     /**
      * Extract the first string argument from a FIR annotation.
@@ -556,6 +709,34 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
     }
 
     /**
+     * Construct a [ConeKotlinType] for [classId], filling its type parameters with `Any?` so
+     * the result is a valid, non-raw type usable as a hint function value-parameter type.
+     *
+     * Why we can't just pass `emptyArray()`: parameterized classes like `SuspendFunction1<P, R>`
+     * (the supertype of `fun interface Foo : suspend (P) -> R`) crash JVM IR codegen at
+     * `AbstractTypeMapper.mapSuspendFunctionType` when their type-arg list is empty — the
+     * suspend-to-continuation lowering reads `arguments[size - 1]` to find the return type
+     * and throws `IndexOutOfBoundsException` on the empty list. Mirrors the IR-side approach
+     * cc9ee22 introduced for issue #18 (`IrClass.hintParameterType` substituting `Any?`).
+     *
+     * `Any?` is a safe placeholder: runtime Koin resolves on the erased class anyway, and the
+     * hint function's only role is to make a name discoverable via `referenceFunctions` for
+     * cross-module hint discovery.
+     */
+    private fun classLikeTypeWithDefaultArgs(classId: ClassId): org.jetbrains.kotlin.fir.types.ConeKotlinType {
+        val classSymbol = session.symbolProvider.getClassLikeSymbolByClassId(classId)
+        val typeParamCount = (classSymbol as? FirClassSymbol<*>)?.typeParameterSymbols?.size ?: 0
+        val args = if (typeParamCount == 0) {
+            emptyArray()
+        } else {
+            val anyNullable: org.jetbrains.kotlin.fir.types.ConeTypeProjection =
+                session.builtinTypes.nullableAnyType.coneType
+            Array(typeParamCount) { anyNullable }
+        }
+        return classId.constructClassLikeType(args, false)
+    }
+
+    /**
      * Build the extra value parameters for binding, scope, and qualifier metadata
      * inside a FIR function builder lambda.
      * Returns a list of (Name, ConeType) pairs to add as value parameters.
@@ -570,25 +751,23 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
 
         // Binding parameters: binding0, binding1, ... with the binding type
         bindingClassIds.forEachIndexed { index, bindingClassId ->
-            val bindingType = bindingClassId.constructClassLikeType(emptyArray(), false)
-            params.add(Name.identifier("binding$index") to bindingType)
+            params.add(Name.identifier("binding$index") to classLikeTypeWithDefaultArgs(bindingClassId))
         }
 
         // Scope parameter: "scope" with the scope class type
         if (scopeClassId != null) {
-            val scopeType = scopeClassId.constructClassLikeType(emptyArray(), false)
-            params.add(Name.identifier("scope") to scopeType)
+            params.add(Name.identifier("scope") to classLikeTypeWithDefaultArgs(scopeClassId))
         }
 
-        // String qualifier: "qualifier_<name>" with Unit type
+        // String qualifier: "qualifier_<sanitized-name>" with Unit type
         if (qualifierName != null) {
-            params.add(Name.identifier("qualifier_$qualifierName") to session.builtinTypes.unitType.coneType)
+            val sanitized = KoinPluginConstants.sanitizeQualifierName(qualifierName)
+            params.add(Name.identifier("qualifier_$sanitized") to session.builtinTypes.unitType.coneType)
         }
 
         // Type qualifier: "qualifierType" with the qualifier class type
         if (qualifierTypeClassId != null) {
-            val qualifierType = qualifierTypeClassId.constructClassLikeType(emptyArray(), false)
-            params.add(Name.identifier("qualifierType") to qualifierType)
+            params.add(Name.identifier("qualifierType") to classLikeTypeWithDefaultArgs(qualifierTypeClassId))
         }
 
         return params
@@ -662,9 +841,12 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                 // Other types (null, metadata) - dependency classes from JARs
                 val containingFileName = when (source) {
                     is KtPsiSourceElement -> {
-                        val file = source.psi.containingFile
-                        log { "    KtPsiSourceElement: psi=${source.psi.javaClass.simpleName}, file=${file?.name}" }
-                        file?.name
+                        val psi = source.psiOrNull()
+                        val file = psi?.containingFile
+                        log { "    KtPsiSourceElement: psi=${psi?.javaClass?.simpleName}, file=${file?.name}" }
+                        // psi=null indicates LinkageError (kapt/Hilt coexistence) — fall back to
+                        // deterministic synthetic name so analysis continues.
+                        file?.name ?: syntheticFileName(classSymbol.classId, "Module")
                     }
                     else -> {
                         // Check if this is a real source element (KtRealSourceElementKind) vs synthetic
@@ -932,7 +1114,8 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                             val qualifierName = extractQualifierName(classSymbol)
                             val qualifierTypeClassId = extractQualifierTypeClassId(classSymbol)
                             val scopeClassId = extractScopeClassId(classSymbol)
-                            val bindingClassIds = detectBindingClassIds(classSymbol.classId)
+                            val bindingClassIds = extractExplicitBindingClassIds(classSymbol)
+                                ?: detectBindingClassIds(classSymbol.classId)
 
                             log { "  Found @$defType class: ${classSymbol.classId} (orphan, needs hint)" }
                             if (qualifierName != null) log { "    qualifier: @Named(\"$qualifierName\")" }
@@ -1006,7 +1189,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                     // Get containing file name
                     val source = functionSymbol.fir.source
                     val containingFileName = when (source) {
-                        is KtPsiSourceElement -> source.psi.containingFile?.name
+                        is KtPsiSourceElement -> source.psiOrNull()?.containingFile?.name
                         else -> {
                             val isRealSource = source?.kind?.toString()?.contains("RealSourceElementKind") == true
                             if (isRealSource) {
@@ -1022,7 +1205,8 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                         val qualifierName = extractQualifierName(functionSymbol)
                         val qualifierTypeClassId = extractQualifierTypeClassId(functionSymbol)
                         val scopeClassId = extractScopeClassId(functionSymbol)
-                        val bindingClassIds = detectBindingClassIds(returnTypeClassId)
+                        val bindingClassIds = extractExplicitBindingClassIds(functionSymbol)
+                            ?: detectBindingClassIds(returnTypeClassId)
 
                         log { "  Found @$defType function: ${callableId.callableName}() -> $returnTypeClassId (orphan, needs hint)" }
                         if (qualifierName != null) log { "    qualifier: @Named(\"$qualifierName\")" }
@@ -1101,7 +1285,8 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                         val qualifierName = extractQualifierName(functionSymbol)
                         val qualifierTypeClassId = extractQualifierTypeClassId(functionSymbol)
                         val scopeClassId = extractScopeClassId(functionSymbol)
-                        val bindingClassIds = detectBindingClassIds(returnTypeClassId)
+                        val bindingClassIds = extractExplicitBindingClassIds(functionSymbol)
+                            ?: detectBindingClassIds(returnTypeClassId)
 
                         log { "  Found @$defType module function: ${containingClassId.shortClassName}.$funcName() -> $returnTypeClassId" }
                         if (qualifierName != null) log { "    qualifier: @Named(\"$qualifierName\")" }
@@ -1192,7 +1377,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
             try {
                 val source = classSymbol.fir.source
                 if (source is KtPsiSourceElement) {
-                    val ktFile = source.psi.containingFile as? org.jetbrains.kotlin.psi.KtFile ?: continue
+                    val ktFile = source.psiOrNull()?.containingFile as? org.jetbrains.kotlin.psi.KtFile ?: continue
                     val filePath = ktFile.virtualFilePath
                     if (filePath in seenFiles) continue
                     seenFiles.add(filePath)
@@ -1223,7 +1408,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
                 for (symbol in potentialClasses.filterIsInstance<FirClassSymbol<*>>()) {
                     val source = symbol.fir.source
                     if (source is KtPsiSourceElement) {
-                        val ktFile = source.psi.containingFile as? org.jetbrains.kotlin.psi.KtFile ?: continue
+                        val ktFile = source.psiOrNull()?.containingFile as? org.jetbrains.kotlin.psi.KtFile ?: continue
                         val filePath = ktFile.virtualFilePath
                         if (filePath in seenFiles) continue
                         seenFiles.add(filePath)
@@ -1321,7 +1506,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
 
         return when (source) {
             is KtPsiSourceElement -> {
-                source.psi.containingFile?.name
+                source.psiOrNull()?.containingFile?.name
             }
             else -> {
                 // Check if this is a real source element (KtRealSourceElementKind) vs synthetic
@@ -1684,11 +1869,16 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
 
     /**
      * Claim ownership of the hints package for generated hint functions.
+     *
+     * Must be unconditional: getTopLevelCallableIds() always emits at least the
+     * default-label hint callable in HINTS_PACKAGE (see the DEFAULT_LABEL block
+     * above). K2.3.20's Fir2IrConverter.registerFileAndClasses calls
+     * FirModuleDescriptor.getPackage(HINTS_PACKAGE) and throws
+     * IllegalStateException if hasPackage() doesn't claim it. Earlier K2
+     * versions tolerated the inconsistency.
      */
     override fun hasPackage(packageFqName: FqName): Boolean {
-        if (packageFqName == HINTS_PACKAGE && (configurationModules.isNotEmpty() || definitionClassInfos.isNotEmpty() || definitionFunctionInfos.isNotEmpty() || moduleDefinitionFunctionInfos.isNotEmpty() || qualifierAnnotationInfos.isNotEmpty())) {
-            return true
-        }
+        if (packageFqName == HINTS_PACKAGE) return true
         return super.hasPackage(packageFqName)
     }
 

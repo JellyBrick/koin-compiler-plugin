@@ -2,6 +2,7 @@ package org.koin.compiler.plugin.ir
 
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.backend.common.lower.DeclarationIrBuilder
+import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.UNDEFINED_OFFSET
 import org.jetbrains.kotlin.ir.builders.*
 import org.jetbrains.kotlin.ir.declarations.*
@@ -19,6 +20,7 @@ import org.jetbrains.kotlin.DeprecatedForRemovalCompilerApi
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.incremental.components.LookupTracker
 import org.koin.compiler.plugin.KoinAnnotationFqNames
+import org.koin.compiler.plugin.KoinDiagnostic
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.jetbrains.kotlin.ir.expressions.IrGetField
 
@@ -104,6 +106,10 @@ class KoinDSLTransformer(
         val function: IrFunction? = null,
         val lambda: IrSimpleFunction? = null,
         val definitionCall: Name? = null,
+        // Type argument of the enclosing typed DSL call (e.g., `single<T> { }` → T).
+        // When set, an inner `create(::Impl)` provides T, not Impl — Impl is the
+        // construction detail, T is what runtime Koin actually registers.
+        val definitionCallTypeArg: IrClass? = null,
         val scopeTypeClass: IrClass? = null,
         val createQualifier: QualifierValue? = null,
         val createReturnClass: IrClass? = null,
@@ -182,6 +188,13 @@ class KoinDSLTransformer(
     // DSL definition function names to track
     private val definitionNames = setOf(singleName, factoryName, scopedName, viewModelName, workerName)
 
+    // FqNames of Koin's bind DSL functions. Anything named `bind` from outside this set
+    // is not ours (Arrow Raise.bind, ktor resourceScope bind, etc.) and must be ignored.
+    private val KOIN_BIND_FQNAMES = setOf(
+        "org.koin.plugin.module.dsl.bind",
+        "org.koin.dsl.bind",
+    )
+
     // Mapping from function names to DefinitionType
     private val definitionTypeMap = mapOf(
         singleName to DefinitionType.SINGLE,
@@ -249,7 +262,16 @@ class KoinDSLTransformer(
         val previousContext = transformContext
 
         if (functionName in definitionNames) {
-            transformContext = transformContext.copy(definitionCall = functionName)
+            // Capture the outer typed DSL call's type argument (e.g., `single<T> { ... }` → T).
+            // Used by handleScopeCreate so `single<T> { create(::Impl) }` registers T as the
+            // provided type instead of Impl.
+            val outerTypeArg = if (expression.typeArgumentsCount >= 1) {
+                (expression.getTypeArgument(0)?.classifierOrNull as? IrClassSymbol)?.owner
+            } else null
+            transformContext = transformContext.copy(
+                definitionCall = functionName,
+                definitionCallTypeArg = outerTypeArg
+            )
         }
 
         // Detect scope<ScopeType> { } — push scope type into context
@@ -270,8 +292,12 @@ class KoinDSLTransformer(
         // Restore previous context
         transformContext = previousContext
 
-        // Detect .bind(Interface::class) — add the bound type to the last collected DslDef
-        if (compileSafetyEnabled && functionName.asString() == "bind") {
+        // Detect Koin's .bind(Interface::class) — add the bound type to the last collected DslDef.
+        // Match by full FqName so we don't trip on unrelated `bind` functions from other libraries
+        // (e.g., Arrow `Raise.bind()`, ktor `resourceScope { bind() }`) — those crashed the IR
+        // transformer by shape-mismatching KoinDefinition.bind's signature (issue #17).
+        if (compileSafetyEnabled && functionName.asString() == "bind" &&
+            callee.fqNameWhenAvailable?.asString() in KOIN_BIND_FQNAMES) {
             collectBindType(transformedCall)
         }
 
@@ -324,7 +350,8 @@ class KoinDSLTransformer(
 
     /**
      * If the call is a Koin resolution function (koinViewModel<T>(), get<T>(), inject<T>(), etc.),
-     * collect it as a pending call-site validation.
+     * collect it as a pending call-site validation. Also captures any trailing
+     * `parametersOf(...)` lambda for KOIN-D005/D006 shape checks downstream.
      */
     private fun collectCallSiteIfResolutionFunction(expression: IrCall, callee: IrSimpleFunction) {
         val calleeFqName = callee.fqNameWhenAvailable?.asString() ?: return
@@ -344,17 +371,150 @@ class KoinDSLTransformer(
             file.fileEntry.getColumnNumber(expression.startOffset) + 1
         } else 0
 
+        // Hunt for the `parametersOf(...)` call directly in the call-site arguments.
+        // We don't try to locate "the lambda" first because Compose's IR plugin wraps trailing
+        // lambdas passed to @Composable functions in arbitrary scaffolding (remember /
+        // sourceInformationMarker / local IrVariable indirections) that hides the user's lambda
+        // structurally — `koinViewModel<T> { parametersOf(...) }` becomes
+        // `IrBlock { ... val tmp = remember(..., { parametersOf(...) }); ... tmp }` after the
+        // Compose IR plugin runs. Walking the whole expression tree for `parametersOf` is
+        // robust to whatever shape Compose produces and falls back cleanly for non-Composable
+        // call sites (where the top-level arg is already an IrFunctionExpression).
+        var parametersOfCall: IrCall? = null
+        for (i in 0 until expression.valueArgumentsCount) {
+            val arg = expression.getValueArgument(i) ?: continue
+            parametersOfCall = findParametersOfCall(arg) ?: continue
+            break
+        }
+        val parametersOfArgs = parametersOfCall?.let { extractParametersOfArgs(it) }
+
         _pendingCallSites.add(PendingCallSiteValidation(
             targetFqName = targetFqName,
             targetClass = targetClass,
             callFunctionName = calleeFqName.substringAfterLast("."),
             filePath = filePath,
             line = line,
-            column = column
+            column = column,
+            hasParametersLambda = parametersOfCall != null,
+            parametersOfArgs = parametersOfArgs,
         ))
 
         // IC: call site file depends on the target class
         trackClassLookup(lookupTracker, currentFile, targetClass)
+    }
+
+    /**
+     * Extract `parametersOf(arg0, arg1, …)` args from the body of a trailing lambda. Returns:
+     *  - non-null list when the body is a single (possibly returned) `parametersOf(...)` call.
+     *    Each entry carries the arg's classifier FqName + nullability for shape comparison.
+     *  - `null` when the lambda body is anything else (non-trivial: `{ buildHolder() }`,
+     *    conditional, multi-statement) — treated as ambiguous downstream so we don't false-
+     *    positive KOIN-D005 on hand-written param builders.
+     *
+     * Strict by design — matches the `unsafeDslChecks` posture used elsewhere in the plugin.
+     */
+    /**
+     * Walk an arbitrary expression tree looking for the first `parametersOf(...)` call.
+     *
+     * Compose's IR plugin rewrites trailing lambdas passed to @Composable functions into
+     * `IrBlock { sourceInformationMarkerStart(...); val tmp = remember(..., { user-lambda });
+     * sourceInformationMarkerEnd(...); tmp }` — i.e., the user's lambda is buried inside an
+     * IrVariable initializer that's an IrCall whose arguments include another IrFunctionExpression
+     * wrapping the original body. Recursing for `parametersOf` cuts through that scaffolding
+     * regardless of the exact shape, and falls back cleanly for the non-Compose case (where the
+     * top-level arg is already an IrFunctionExpression).
+     */
+    private fun findParametersOfCall(node: IrElement?): IrCall? =
+        findParametersOfCall(node, java.util.IdentityHashMap<IrElement, Unit>())
+
+    private fun findParametersOfCall(
+        node: IrElement?,
+        visited: java.util.IdentityHashMap<IrElement, Unit>,
+    ): IrCall? {
+        if (node == null) return null
+        // Function references and IrFunctionExpression resolve to function bodies we may also
+        // reach by descending into call arguments — guard with identity to avoid revisits and
+        // (in pathological IR) infinite recursion on cyclic references.
+        if (visited.put(node, Unit) != null) return null
+        if (node is IrCall) {
+            val fqName = node.symbol.owner.fqNameWhenAvailable?.asString()
+            if (fqName == KoinAnnotationFqNames.PARAMETERS_OF.asString()) return node
+            for (i in 0 until node.valueArgumentsCount) {
+                findParametersOfCall(node.getValueArgument(i), visited)?.let { return it }
+            }
+            findParametersOfCall(node.dispatchReceiver, visited)?.let { return it }
+            findParametersOfCall(node.extensionReceiver, visited)?.let { return it }
+        }
+        if (node is IrFunctionExpression) {
+            return findParametersOfCall(node.function.body, visited)
+        }
+        if (node is IrFunctionReference) {
+            return findParametersOfCall((node.symbol.owner as? IrSimpleFunction)?.body, visited)
+        }
+        if (node is IrBlockBody) {
+            for (stmt in node.statements) findParametersOfCall(stmt, visited)?.let { return it }
+        }
+        if (node is IrContainerExpression) {
+            for (stmt in node.statements) findParametersOfCall(stmt, visited)?.let { return it }
+        }
+        if (node is IrReturn) return findParametersOfCall(node.value, visited)
+        if (node is IrVariable) return findParametersOfCall(node.initializer, visited)
+        if (node is IrTypeOperatorCall) return findParametersOfCall(node.argument, visited)
+        if (node is IrSetValue) return findParametersOfCall(node.value, visited)
+        return null
+    }
+
+    private fun extractParametersOfArgs(
+        call: IrCall,
+    ): List<BindingRegistry.Companion.ParametersOfArg>? {
+        // parametersOf is `vararg values: Any?` — a single value-argument that's an IrVararg.
+        val args = mutableListOf<BindingRegistry.Companion.ParametersOfArg>()
+        if (call.valueArgumentsCount == 0) return args
+        val varargArg = call.getValueArgument(0)
+        when (varargArg) {
+            is IrVararg -> {
+                for (element in varargArg.elements) {
+                    args.add(classifyParametersOfArg(element))
+                }
+            }
+            null -> { /* parametersOf() with no args */ }
+            else -> {
+                // Single non-vararg arg (e.g., spread-only). Best-effort classify as-is.
+                args.add(classifyParametersOfArg(varargArg))
+            }
+        }
+        return args
+    }
+
+    /**
+     * Classify one positional `parametersOf` argument into a [BindingRegistry.Companion.ParametersOfArg]
+     * for shape comparison. Spread operators (`*list`) and unclassifiable expressions yield an
+     * ambiguous marker (`typeFqName=null, isNullable=false`) so the downstream validator skips
+     * the whole call rather than emit a false mismatch.
+     */
+    private fun classifyParametersOfArg(
+        element: org.jetbrains.kotlin.ir.IrElement,
+    ): BindingRegistry.Companion.ParametersOfArg {
+        // Spread element — can't classify its contents statically.
+        if (element is IrSpreadElement) {
+            return BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = false)
+        }
+
+        val expr = element as? IrExpression
+            ?: return BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = false)
+
+        // null literal
+        if (expr is IrConst && expr.value == null) {
+            return BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = true)
+        }
+
+        val type = expr.type
+        val classifier = type.classifierOrNull?.owner as? IrClass
+        val fqName = classifier?.fqNameWhenAvailable?.asString()
+        return BindingRegistry.Companion.ParametersOfArg(
+            typeFqName = fqName,
+            isNullable = type.isMarkedNullable(),
+        )
     }
 
     /**
@@ -483,7 +643,8 @@ class KoinDSLTransformer(
                 bindings = emptyList(), // DSL: only explicit bind() adds bindings (no auto-bind like annotations)
                 scopeClass = if (defType == DefinitionType.SCOPED) transformContext.scopeTypeClass else null,
                 modulePropertyId = transformContext.modulePropertyId,
-                qualifier = qualifier
+                qualifier = qualifier,
+                registrationSourceFile = currentFile
             ))
         }
 
@@ -569,20 +730,25 @@ class KoinDSLTransformer(
                 if (classQualifier != null && currentDefinitionCall != null) {
                     transformContext = transformContext.copy(createQualifier = classQualifier, createReturnClass = targetClass)
                 }
-                // Collect DSL definition from create(::T) based on enclosing definition call
+                // Collect DSL definition from create(::T) based on enclosing definition call.
+                // When the enclosing call is typed (e.g. `single<Interface> { create(::Impl) }`),
+                // the provided type is the outer `<T>`, not the create target — runtime Koin
+                // registers `T` and the impl is just a construction detail.
                 val enclosingDefType = currentDefinitionCall?.let { definitionTypeMap[it] }
+                val providedClass = transformContext.definitionCallTypeArg ?: targetClass
                 if (enclosingDefType != null && compileSafetyEnabled) {
                     _dslDefinitions.add(Definition.DslDef(
-                        irClass = targetClass,
+                        irClass = providedClass,
                         definitionType = enclosingDefType,
                         bindings = emptyList(), // DSL: only explicit bind() adds bindings (no auto-bind like annotations)
                         scopeClass = if (enclosingDefType == DefinitionType.SCOPED) transformContext.scopeTypeClass else null,
                         modulePropertyId = transformContext.modulePropertyId,
-                        qualifier = classQualifier
+                        qualifier = classQualifier,
+                        registrationSourceFile = currentFile
                     ))
                 }
                 val enclosingDef = currentDefinitionCall?.asString() ?: "unknown"
-                KoinPluginLogger.user { "Intercepting $enclosingDef { create(::${targetClass.name}) } -> ${targetClass.name}" }
+                KoinPluginLogger.user { "Intercepting $enclosingDef { create(::${targetClass.name}) } -> ${providedClass.name}" }
                 builder.irCallConstructor(referencedFunction.symbol, emptyList()).apply {
                     referencedFunction.valueParameters.forEachIndexed { index, param ->
                         val argument = argumentGenerator.generateKoinArgumentForParameter(param, scopeReceiver, null, builder)
@@ -604,16 +770,20 @@ class KoinDSLTransformer(
                     )
                 }
                 val enclosingDefType = currentDefinitionCall?.let { definitionTypeMap[it] }
-                if (enclosingDefType != null && compileSafetyEnabled && returnTypeClass != null) {
-                    trackClassLookup(lookupTracker, currentFile, returnTypeClass)
+                // Same typed-enclosing rule as the constructor branch: `single<T> { create(::func) }`
+                // registers T, not the function's return type.
+                val providedClass = transformContext.definitionCallTypeArg ?: returnTypeClass
+                if (enclosingDefType != null && compileSafetyEnabled && providedClass != null) {
+                    trackClassLookup(lookupTracker, currentFile, providedClass)
                     _dslDefinitions.add(Definition.DslDef(
-                        irClass = returnTypeClass,
+                        irClass = providedClass,
                         definitionType = enclosingDefType,
                         bindings = emptyList(), // DSL: only explicit bind() adds bindings
                         scopeClass = if (enclosingDefType == DefinitionType.SCOPED) transformContext.scopeTypeClass else null,
                         modulePropertyId = transformContext.modulePropertyId,
                         providerOnly = true,
-                        qualifier = funcQualifier
+                        qualifier = funcQualifier,
+                        registrationSourceFile = currentFile
                     ))
                 }
                 val returnTypeName = referencedFunction.returnType.classFqName?.shortName() ?: referencedFunction.returnType.toString()
@@ -712,11 +882,7 @@ class KoinDSLTransformer(
                 is IrConstructor -> (referencedFunction.parent as IrClass).name.asString()
                 is IrSimpleFunction -> referencedFunction.name.asString()
             }
-            KoinPluginLogger.error(
-                "create(::$targetName) must be the only instruction in the lambda. " +
-                "Other statements are not allowed when using create(). " +
-                "To disable this check, set koinCompiler { unsafeDslChecks = false } in your build.gradle.kts"
-            )
+            KoinPluginLogger.report(KoinDiagnostic.UnsafeDsl(target = targetName))
         }
     }
 
@@ -761,6 +927,21 @@ class KoinDSLTransformer(
 /**
  * A pending call-site validation collected during Phase 2.
  * Validated after Phase 3 when the assembled graph is available.
+ *
+ * Two-field encoding of `parametersOf(...)` state so KOIN-D005 and KOIN-D006 can fire
+ * independently:
+ *
+ * @property hasParametersLambda `true` iff the user passed a trailing lambda for the
+ *   `parameters: (() -> ParametersHolder)?` slot. Used by KOIN-D006: if a def needs
+ *   `@InjectedParam` but this is `false`, the user forgot `parametersOf(...)` entirely.
+ *
+ * @property parametersOfArgs Positional args captured when the trailing lambda contains a
+ *   single statically detectable `parametersOf(...)` call. `null` means either no lambda
+ *   was passed OR the lambda was non-trivial (`{ buildHolder() }`, `{ if (...) … }`, etc.) —
+ *   in the latter case shape checks (KOIN-D005) are skipped to avoid false positives.
+ *   Empty list means `parametersOf()` (no args). Items whose `typeFqName == null` and
+ *   `isNullable == false` represent args we couldn't classify; presence of any such arg
+ *   makes the whole call ambiguous downstream.
  */
 data class PendingCallSiteValidation(
     val targetFqName: String,
@@ -768,5 +949,7 @@ data class PendingCallSiteValidation(
     val callFunctionName: String,
     val filePath: String?,
     val line: Int,
-    val column: Int
+    val column: Int,
+    val hasParametersLambda: Boolean = false,
+    val parametersOfArgs: List<BindingRegistry.Companion.ParametersOfArg>? = null,
 )

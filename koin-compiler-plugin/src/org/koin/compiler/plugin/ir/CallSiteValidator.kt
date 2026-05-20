@@ -20,6 +20,7 @@ import org.jetbrains.kotlin.ir.types.classifierOrNull
 import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.Name
+import org.koin.compiler.plugin.KoinDiagnostic
 import org.koin.compiler.plugin.KoinPluginConstants
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.ProvidedTypeRegistry
@@ -53,12 +54,17 @@ class CallSiteValidator(private val context: IrPluginContext) {
         assembledGraphTypes: Set<String>,
         dslDefinitions: List<Definition>,
         annotationProcessor: KoinAnnotationProcessor?,
-        dslHintGenerator: DslHintGenerator
+        dslHintGenerator: DslHintGenerator,
+        injectedParamHints: InjectedParamHintGenerator? = null,
     ) {
         val hasFullGraph = assembledGraphTypes.isNotEmpty()
 
-        // Discover DSL definitions from dependency hints (cross-module DSL discovery)
-        val dslHintTypes = if (!hasFullGraph) dslHintGenerator.discoverDslDefinitionTypes() else emptySet()
+        // Discover DSL definitions from dependency hints (cross-module DSL discovery).
+        // Always merge: A3's assembled graph only contains @Module classes' definitions, not
+        // DSL definitions loaded via `modules(dslModule)` from upstream modules. The hints
+        // generated at Phase 2.5 in upstream compiles cover that gap (e.g. typed
+        // `startKoin<MyApp>() { modules(dslModule) }` where dslModule lives in another source set).
+        val dslHintTypes = dslHintGenerator.discoverDslDefinitionTypes()
 
         // Build the set of all known provided types
         val allKnownTypes = buildSet {
@@ -105,6 +111,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
             // Check assembled graph + DSL definitions + DSL hints
             if (callSite.targetFqName in allKnownTypes) {
                 KoinPluginLogger.debug { "A4: OK ${callSite.callFunctionName}<${callSite.targetFqName}>() — found in graph" }
+                if (injectedParamHints != null) validateInjectedParamShapeAtCallSite(callSite, injectedParamHints)
                 continue
             }
 
@@ -116,6 +123,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 }
                 if (hasAnnotation) {
                     KoinPluginLogger.debug { "A4: OK ${callSite.callFunctionName}<${callSite.targetFqName}>() — has definition annotation" }
+                    if (injectedParamHints != null) validateInjectedParamShapeAtCallSite(callSite, injectedParamHints)
                     continue
                 }
             }
@@ -133,11 +141,11 @@ class CallSiteValidator(private val context: IrPluginContext) {
             }
 
             // Report error — either full graph available, or local type with local definitions
-            KoinPluginLogger.error(
-                "Missing definition: ${callSite.targetFqName}\n" +
-                "  resolved by: ${callSite.callFunctionName}<${callSite.targetClass.name}>()\n" +
-                "  No matching definition found in any declared module.\n" +
-                "  Check your declaration with Annotation or DSL.",
+            KoinPluginLogger.report(
+                KoinDiagnostic.MissingCallSite(
+                    type = callSite.targetFqName,
+                    callFn = callSite.callFunctionName,
+                ),
                 callSite.filePath, callSite.line, callSite.column
             )
         }
@@ -177,6 +185,14 @@ class CallSiteValidator(private val context: IrPluginContext) {
         // Deduplicate by target FQ name
         val uniqueCallSites = unresolvedCallSites.distinctBy { it.targetFqName }
 
+        // Module-specific prefix for hint filenames so two Gradle modules that both
+        // koinInject<SameType>() don't produce identical class names — which otherwise
+        // trips the Android dex merger (issue #20). Composes the Gradle `project.path`
+        // (when available via koin.moduleId) with the FIR module-data name so KMP
+        // targets within the same Gradle module also stay distinct.
+        val modulePrefix = HintFilePrefix.of(firModuleData.name.asString())
+            .ifEmpty { "module__" }
+
         for (callSite in uniqueCallSites) {
             val targetClass = callSite.targetClass
 
@@ -201,13 +217,13 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 isFakeOverride = false
             )
 
-            // Add parameter with the required type
+            // Add parameter with the required type (erased to raw form for generics — see #18)
             val requiredParam = context.irFactory.createValueParameter(
                 startOffset = UNDEFINED_OFFSET,
                 endOffset = UNDEFINED_OFFSET,
                 origin = IrDeclarationOrigin.DEFINED,
                 name = Name.identifier("required"),
-                type = targetClass.defaultType,
+                type = targetClass.hintParameterType(context),
                 isAssignable = false,
                 symbol = IrValueParameterSymbolImpl(),
                 index = 0,
@@ -225,11 +241,12 @@ class CallSiteValidator(private val context: IrPluginContext) {
             // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets
             function.addDeprecatedHiddenAnnotation(context)
 
-            // Build deterministic file name
+            // Build deterministic file name, prefixed by module identifier to keep
+            // hint class names unique across Gradle modules (see above — issue #20).
             val sanitizedName = callSite.targetFqName.split(".")
                 .joinToString("") { it.replaceFirstChar { c -> c.uppercaseChar() } }
                 .replaceFirstChar { it.lowercaseChar() }
-            val fileName = "${sanitizedName}_callsite.kt"
+            val fileName = "${modulePrefix}${sanitizedName}_callsite.kt"
 
             val firFile = buildFile {
                 moduleData = firModuleData
@@ -238,8 +255,12 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 name = fileName
             }
 
-            // Create synthetic IrFile
-            val basePath = moduleFragment.files.firstOrNull()?.fileEntry?.name ?: "/synthetic"
+            // Anchor the synthetic hint file on the call site's source file so the path stays
+            // stable across incremental rebuilds (see issue #32). Fall back to the
+            // alphabetically-first source file in the module — also stable, just less local.
+            val basePath = callSite.filePath
+                ?: moduleFragment.files.minByOrNull { it.fileEntry.name }?.fileEntry?.name
+                ?: "/synthetic"
             val fakeNewPath = Path(basePath).parent.resolve(fileName)
 
             val hintFile = IrFileImpl(
@@ -334,11 +355,8 @@ class CallSiteValidator(private val context: IrPluginContext) {
             } else 0
 
             // Report error with best-available location info
-            KoinPluginLogger.error(
-                "Missing definition: $targetFqName\n" +
-                "  Required by a call site in a dependency module (deferred validation).\n" +
-                "  No matching definition found in any declared module.\n" +
-                "  Check your declaration with Annotation or DSL.",
+            KoinPluginLogger.report(
+                KoinDiagnostic.MissingCallSiteDeferred(type = targetFqName),
                 hintFilePath, hintLine, hintColumn
             )
         }
@@ -544,10 +562,74 @@ class CallSiteValidator(private val context: IrPluginContext) {
         for ((moduleId, defs) in byModule) {
             val typeNames = defs.mapNotNull { it.returnTypeClass.fqNameWhenAvailable?.shortName()?.asString() }
             val shortModuleName = moduleId.substringAfterLast('.')
-            KoinPluginLogger.error(
-                "Module '$shortModuleName' is not loaded at startKoin — ${defs.size} definitions unreachable: ${typeNames.joinToString()}\n" +
-                "  Add it to modules() or includes() to make these definitions available"
+            KoinPluginLogger.report(
+                KoinDiagnostic.UnreachableModule(
+                    module = shortModuleName,
+                    types = typeNames,
+                )
             )
+        }
+    }
+
+    /**
+     * KOIN-D005 / KOIN-D006 — validate `parametersOf(...)` shape at this call site against the
+     * target def's `@InjectedParam` slots (looked up locally first, then via the
+     * `injectedparams_*` cross-module hint).
+     *
+     * Decision matrix:
+     *   slots == null              → def doesn't need params (or unknown) → no report
+     *   !hasParametersLambda       → user forgot `parametersOf` entirely → KOIN-D006
+     *   parametersOfArgs == null   → trailing lambda was non-trivial → ambiguous, no report
+     *   shape != Ok                → KOIN-D005 with reason ARITY or TYPE
+     */
+    private fun validateInjectedParamShapeAtCallSite(
+        callSite: PendingCallSiteValidation,
+        hints: InjectedParamHintGenerator,
+    ) {
+        val slots = hints.getSlots(callSite.targetFqName) ?: return
+
+        if (!callSite.hasParametersLambda) {
+            KoinPluginLogger.report(
+                KoinDiagnostic.MissingInjectedParams(
+                    target = callSite.targetFqName,
+                    expected = BindingRegistry.renderSlots(slots),
+                    callFn = callSite.callFunctionName,
+                ),
+                callSite.filePath, callSite.line, callSite.column,
+            )
+            return
+        }
+
+        val args = callSite.parametersOfArgs
+            ?: return // ambiguous lambda (e.g. `{ buildHolder() }`) — skip
+
+        when (val check = BindingRegistry.validateInjectedParamShape(slots, args)) {
+            is BindingRegistry.Companion.ShapeCheck.Ok -> { /* validated */ }
+            is BindingRegistry.Companion.ShapeCheck.Ambiguous -> {
+                KoinPluginLogger.debug { "A4: skip shape check for ${callSite.targetFqName} (ambiguous parametersOf arg)" }
+            }
+            is BindingRegistry.Companion.ShapeCheck.ArityMismatch -> {
+                KoinPluginLogger.report(
+                    KoinDiagnostic.MismatchedInjectedParams(
+                        target = callSite.targetFqName,
+                        expected = BindingRegistry.renderSlots(slots),
+                        actual = BindingRegistry.renderArgs(args),
+                        reason = KoinDiagnostic.MismatchedInjectedParams.Reason.ARITY,
+                    ),
+                    callSite.filePath, callSite.line, callSite.column,
+                )
+            }
+            is BindingRegistry.Companion.ShapeCheck.TypeMismatch -> {
+                KoinPluginLogger.report(
+                    KoinDiagnostic.MismatchedInjectedParams(
+                        target = callSite.targetFqName,
+                        expected = BindingRegistry.renderSlots(slots),
+                        actual = BindingRegistry.renderArgs(args),
+                        reason = KoinDiagnostic.MismatchedInjectedParams.Reason.TYPE,
+                    ),
+                    callSite.filePath, callSite.line, callSite.column,
+                )
+            }
         }
     }
 }

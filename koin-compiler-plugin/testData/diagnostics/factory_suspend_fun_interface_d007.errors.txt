@@ -1,0 +1,4 @@
+[Koin][KOIN-D007] Unsupported binding: testpkg.SetUsernameUseCase extends kotlin.coroutines.SuspendFunction1
+  Suspend function injection is not yet supported by Koin runtime.
+  Remove the @Single / @Factory / @Scoped registration, or refactor the binding type to not extend a suspend function.
+  Tracked at https://github.com/InsertKoinIO/koin-compiler-plugin/issues/16

@@ -1,0 +1,1 @@
+[Koin][KOIN-A002] @KoinWorker definition 'testpkg.MyWorker' cannot be generated: 'buildWorker' is not on classpath. Add dependency: io.insert-koin:koin-android-workmanager

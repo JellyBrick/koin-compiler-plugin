@@ -380,6 +380,284 @@ class BindingRegistryTest {
     }
 
     // ================================================================================
+    // Cycle detection (pure-graph DFS, no IR)
+    // ================================================================================
+
+    @Test
+    fun `DAG has no cycles`() {
+        // A -> B -> C (no back-edge)
+        val adj = mapOf(
+            "A" to listOf("B"),
+            "B" to listOf("C"),
+            "C" to emptyList(),
+        )
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertTrue(cycles.isEmpty(), "unexpected cycles: $cycles")
+    }
+
+    @Test
+    fun `self-cycle is detected`() {
+        // A -> A
+        val adj = mapOf("A" to listOf("A"))
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertEquals(1, cycles.size)
+        assertEquals(listOf("A", "A"), cycles[0])
+    }
+
+    @Test
+    fun `direct mutual cycle is detected`() {
+        // A <-> B
+        val adj = mapOf(
+            "A" to listOf("B"),
+            "B" to listOf("A"),
+        )
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertEquals(1, cycles.size)
+        // Closed path back to the same starting node
+        assertEquals(cycles[0].first(), cycles[0].last())
+        assertEquals(2, cycles[0].toSet().size) // two distinct nodes
+    }
+
+    @Test
+    fun `transitive cycle is detected`() {
+        // A -> B -> C -> A
+        val adj = mapOf(
+            "A" to listOf("B"),
+            "B" to listOf("C"),
+            "C" to listOf("A"),
+        )
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertEquals(1, cycles.size)
+        val cycle = cycles[0]
+        assertEquals(cycle.first(), cycle.last())
+        assertEquals(3, cycle.toSet().size) // A, B, C
+        assertTrue(cycle.containsAll(listOf("A", "B", "C")))
+    }
+
+    @Test
+    fun `cycle in branched subtree is detected without falsing the acyclic branch`() {
+        //       A
+        //      / \
+        //     B   C
+        //     |   |
+        //     D   E -> C  (cycle: C -> E -> C)
+        //     |
+        //     F  (no cycle on the B branch)
+        val adj = mapOf(
+            "A" to listOf("B", "C"),
+            "B" to listOf("D"),
+            "D" to listOf("F"),
+            "F" to emptyList(),
+            "C" to listOf("E"),
+            "E" to listOf("C"),
+        )
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertEquals(1, cycles.size)
+        val cycle = cycles[0]
+        assertTrue("C" in cycle && "E" in cycle, "expected C-E cycle, got $cycle")
+    }
+
+    @Test
+    fun `two disjoint cycles are both detected`() {
+        // A <-> B,  C <-> D  (two separate connected components, each cyclic)
+        val adj = mapOf(
+            "A" to listOf("B"),
+            "B" to listOf("A"),
+            "C" to listOf("D"),
+            "D" to listOf("C"),
+        )
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertEquals(2, cycles.size)
+    }
+
+    @Test
+    fun `cross-edge into already-finished subtree does not report a phantom cycle`() {
+        // A -> B -> C   and   D -> C   (D's edge to C is a cross-edge, NOT a back-edge)
+        // No cycle exists; algorithm must not confuse cross-edges with back-edges.
+        val adj = mapOf(
+            "A" to listOf("B"),
+            "B" to listOf("C"),
+            "C" to emptyList(),
+            "D" to listOf("C"),
+        )
+        val cycles = BindingRegistry.findCyclesInGraph(adj.keys, adj)
+        assertTrue(cycles.isEmpty(), "cross-edge misidentified as cycle: $cycles")
+    }
+
+    @Test
+    fun `empty graph has no cycles`() {
+        val cycles = BindingRegistry.findCyclesInGraph(emptyList<String>(), emptyMap())
+        assertTrue(cycles.isEmpty())
+    }
+
+    @Test
+    fun `canonicalizeCycle drops trailing duplicate and rotates to lex-smallest`() {
+        // Closed cycles starting at each rotation should canonicalize identically.
+        val k1 = BindingRegistry.canonicalizeCycle(listOf("A", "B", "C", "A"))
+        val k2 = BindingRegistry.canonicalizeCycle(listOf("B", "C", "A", "B"))
+        val k3 = BindingRegistry.canonicalizeCycle(listOf("C", "A", "B", "C"))
+        assertEquals("A→B→C", k1)
+        assertEquals(k1, k2)
+        assertEquals(k1, k3)
+    }
+
+    @Test
+    fun `canonicalizeCycle handles direct cycle`() {
+        assertEquals(
+            BindingRegistry.canonicalizeCycle(listOf("A", "B", "A")),
+            BindingRegistry.canonicalizeCycle(listOf("B", "A", "B")),
+        )
+    }
+
+    @Test
+    fun `canonicalizeCycle handles self-cycle`() {
+        // [A, A] -> open [A] -> canonical "A"
+        assertEquals("A", BindingRegistry.canonicalizeCycle(listOf("A", "A")))
+    }
+
+    @Test
+    fun `canonicalizeCycle distinguishes different cycles`() {
+        // {A, B, C} cycle should not collide with {A, B, D} cycle.
+        val k1 = BindingRegistry.canonicalizeCycle(listOf("A", "B", "C", "A"))
+        val k2 = BindingRegistry.canonicalizeCycle(listOf("A", "B", "D", "A"))
+        assertTrue(k1 != k2, "different cycles canonicalized to same key: $k1")
+    }
+
+    // ================================================================================
+    // @InjectedParam call-site shape validation (KOIN-D005, pure-data, no IR)
+    // ================================================================================
+
+    @Test
+    fun `validateInjectedParamShape Ok when arity and types match`() {
+        val slots = listOf(
+            InjectedParamSlot("id", "kotlin.String", isNullable = false),
+            InjectedParamSlot("count", "kotlin.Int", isNullable = false),
+        )
+        val args = listOf(
+            BindingRegistry.Companion.ParametersOfArg("kotlin.String", false),
+            BindingRegistry.Companion.ParametersOfArg("kotlin.Int", false),
+        )
+        assertEquals(BindingRegistry.Companion.ShapeCheck.Ok, BindingRegistry.validateInjectedParamShape(slots, args))
+    }
+
+    @Test
+    fun `validateInjectedParamShape ArityMismatch when actual is shorter`() {
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", false))
+        val args = emptyList<BindingRegistry.Companion.ParametersOfArg>()
+        val result = BindingRegistry.validateInjectedParamShape(slots, args)
+        assertTrue(result is BindingRegistry.Companion.ShapeCheck.ArityMismatch)
+        result as BindingRegistry.Companion.ShapeCheck.ArityMismatch
+        assertEquals(1, result.expected)
+        assertEquals(0, result.actual)
+    }
+
+    @Test
+    fun `validateInjectedParamShape ArityMismatch when actual is longer`() {
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", false))
+        val args = listOf(
+            BindingRegistry.Companion.ParametersOfArg("kotlin.String", false),
+            BindingRegistry.Companion.ParametersOfArg("kotlin.Int", false),
+        )
+        val result = BindingRegistry.validateInjectedParamShape(slots, args)
+        assertTrue(result is BindingRegistry.Companion.ShapeCheck.ArityMismatch)
+    }
+
+    @Test
+    fun `validateInjectedParamShape TypeMismatch when arg type differs`() {
+        // String slot, but caller passed an Int → TYPE mismatch at index 0.
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", false))
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg("kotlin.Int", false))
+        val result = BindingRegistry.validateInjectedParamShape(slots, args)
+        assertTrue(result is BindingRegistry.Companion.ShapeCheck.TypeMismatch)
+        result as BindingRegistry.Companion.ShapeCheck.TypeMismatch
+        assertEquals(0, result.index)
+        assertEquals("kotlin.String", result.expectedSlot.typeFqName)
+        assertEquals("kotlin.Int", result.actualArg.typeFqName)
+    }
+
+    @Test
+    fun `validateInjectedParamShape Ok when non-null arg into nullable slot`() {
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", isNullable = true))
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg("kotlin.String", false))
+        assertEquals(BindingRegistry.Companion.ShapeCheck.Ok, BindingRegistry.validateInjectedParamShape(slots, args))
+    }
+
+    @Test
+    fun `validateInjectedParamShape TypeMismatch when nullable arg into non-null slot`() {
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", isNullable = false))
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg("kotlin.String", isNullable = true))
+        val result = BindingRegistry.validateInjectedParamShape(slots, args)
+        assertTrue(result is BindingRegistry.Companion.ShapeCheck.TypeMismatch)
+    }
+
+    @Test
+    fun `validateInjectedParamShape Ok when null literal into nullable slot`() {
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", isNullable = true))
+        // null literal: typeFqName=null, isNullable=true (per classifyParametersOfArg contract)
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = true))
+        assertEquals(BindingRegistry.Companion.ShapeCheck.Ok, BindingRegistry.validateInjectedParamShape(slots, args))
+    }
+
+    @Test
+    fun `validateInjectedParamShape TypeMismatch when null literal into non-null slot`() {
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", isNullable = false))
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = true))
+        val result = BindingRegistry.validateInjectedParamShape(slots, args)
+        assertTrue(result is BindingRegistry.Companion.ShapeCheck.TypeMismatch)
+    }
+
+    @Test
+    fun `validateInjectedParamShape Ambiguous when any arg unclassifiable`() {
+        // An arg with typeFqName=null and isNullable=false is the "couldn't classify" signal —
+        // we must not emit a false-positive mismatch.
+        val slots = listOf(InjectedParamSlot("id", "kotlin.String", isNullable = false))
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = false))
+        assertEquals(BindingRegistry.Companion.ShapeCheck.Ambiguous, BindingRegistry.validateInjectedParamShape(slots, args))
+    }
+
+    @Test
+    fun `validateInjectedParamShape ArityMismatch with empty slots and non-empty args`() {
+        // Def has no @InjectedParam but caller passed parametersOf("x") — still wrong.
+        val slots = emptyList<InjectedParamSlot>()
+        val args = listOf(BindingRegistry.Companion.ParametersOfArg("kotlin.String", false))
+        val result = BindingRegistry.validateInjectedParamShape(slots, args)
+        assertTrue(result is BindingRegistry.Companion.ShapeCheck.ArityMismatch)
+        result as BindingRegistry.Companion.ShapeCheck.ArityMismatch
+        assertEquals(0, result.expected)
+        assertEquals(1, result.actual)
+    }
+
+    @Test
+    fun `validateInjectedParamShape Ok when both empty`() {
+        // Vacuously valid: no slots, no args.
+        val slots = emptyList<InjectedParamSlot>()
+        val args = emptyList<BindingRegistry.Companion.ParametersOfArg>()
+        assertEquals(BindingRegistry.Companion.ShapeCheck.Ok, BindingRegistry.validateInjectedParamShape(slots, args))
+    }
+
+    @Test
+    fun `renderSlots formats name and nullability`() {
+        val slots = listOf(
+            InjectedParamSlot("id", "kotlin.String", false),
+            InjectedParamSlot("count", "kotlin.Int", true),
+        )
+        val rendered = BindingRegistry.renderSlots(slots)
+        assertEquals("id: kotlin.String", rendered[0])
+        assertEquals("count: kotlin.Int?", rendered[1])
+    }
+
+    @Test
+    fun `renderArgs formats type and nullability with unknown fallback`() {
+        val args = listOf(
+            BindingRegistry.Companion.ParametersOfArg("kotlin.String", false),
+            BindingRegistry.Companion.ParametersOfArg(typeFqName = null, isNullable = true),
+        )
+        val rendered = BindingRegistry.renderArgs(args)
+        assertEquals("kotlin.String", rendered[0])
+        assertEquals("<unknown>?", rendered[1])
+    }
+
+    // ================================================================================
     // Helpers
     // ================================================================================
 

@@ -21,6 +21,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.koin.compiler.plugin.KoinAnnotationFqNames
+import org.koin.compiler.plugin.KoinDiagnostic
 import org.koin.compiler.plugin.KoinPluginLogger
 
 /**
@@ -118,7 +119,7 @@ class KoinMonitorTransformer(
         if (kotzillaCoreClass == null || getDefaultInstanceFunction == null) {
             // Only log once per compilation to avoid spam
             if (!sdkMissingWarningLogged && shouldMonitorFunction(declaration)) {
-                KoinPluginLogger.warn("@Monitor: Kotzilla SDK not found on classpath - monitoring disabled")
+                KoinPluginLogger.report(KoinDiagnostic.MonitorNoSdk())
                 sdkMissingWarningLogged = true
             }
             return super.visitSimpleFunction(declaration)

@@ -1,0 +1,44 @@
+FILE: test.kt
+    package testpkg
+
+    public abstract fun interface SetUsernameUseCase : R|suspend (kotlin/String) -> kotlin/Unit| {
+    }
+    public final class UserRepository : R|kotlin/Any| {
+        public constructor(): R|testpkg/UserRepository| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final suspend fun setUsername(name: R|kotlin/String|): R|kotlin/Unit| {
+        }
+
+    }
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|() public final class AppModule : R|kotlin/Any| {
+        public constructor(): R|testpkg/AppModule| {
+            super<R|kotlin/Any|>()
+        }
+
+        @R|org/koin/core/annotation/Factory|() public final fun provideUserRepository(): R|testpkg/UserRepository| {
+            ^provideUserRepository R|testpkg/UserRepository.UserRepository|()
+        }
+
+        @R|org/koin/core/annotation/Factory|() public final fun provideSetUsernameUseCase(userRepository: R|testpkg/UserRepository|): R|testpkg/SetUsernameUseCase| {
+            ^provideSetUsernameUseCase R|testpkg/SetUsernameUseCase|(R|<local>/userRepository|::R|testpkg/UserRepository.setUsername|)
+        }
+
+    }
+    public final fun useIt(): R|kotlin/Unit| {
+        lval koin: R|org/koin/core/Koin| = R|org/koin/dsl/koinApplication|(<L> = koinApplication@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            this@R|special/anonymous|.R|org/koin/core/KoinApplication.modules|(R|testpkg/AppModule.AppModule|().R|testpkg/module|())
+        }
+        ).R|org/koin/core/KoinApplication.koin|
+        R|<local>/koin|.R|org/koin/core/Koin.get|<R|testpkg/SetUsernameUseCase|>()
+    }
+FILE: testpkg/testpkgAppModuleModule.kt
+    package testpkg
+
+    public final fun R|testpkg/AppModule|.module(): R|org/koin/core/module/Module|
+FILE: org/koin/plugin/hints/testpkgAppModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_testpkg_AppModule__provideUserRepository(contributed: R|testpkg/UserRepository|): R|kotlin/Unit|
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_testpkg_AppModule__provideSetUsernameUseCase(contributed: R|testpkg/SetUsernameUseCase|): R|kotlin/Unit|

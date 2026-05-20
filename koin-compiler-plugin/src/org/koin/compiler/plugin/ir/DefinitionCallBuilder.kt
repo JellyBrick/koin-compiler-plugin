@@ -17,6 +17,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.koin.compiler.plugin.KoinAnnotationFqNames
+import org.koin.compiler.plugin.KoinDiagnostic
 import org.koin.compiler.plugin.KoinPluginLogger
 
 /**
@@ -42,6 +43,12 @@ class DefinitionCallBuilder(
     private val javaxInjectFqName = KoinAnnotationFqNames.JAVAX_INJECT
 
     private val kClassClass by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.KCLASS))?.owner }
+
+    /**
+     * Tracks which DefinitionTypes have already produced a "missing artifact" error,
+     * so we report once per compilation per definition type (not once per skipped definition).
+     */
+    private val reportedMissingArtifacts = java.util.EnumSet.noneOf(DefinitionType::class.java)
 
     /**
      * Build: single(A::class, null) { A(get(), get()) } [bind Interface::class]
@@ -70,7 +77,7 @@ class DefinitionCallBuilder(
 
         val targetFunction = findDefinitionWithKClass(Name.identifier(functionName), "org.koin.plugin.module.dsl", "Module")
         if (targetFunction == null) {
-            KoinPluginLogger.debug { "$functionName not found for Module receiver - definition ${targetClass.name} skipped" }
+            reportMissingDslArtifact(definition.definitionType, targetClass.fqNameWhenAvailable?.asString() ?: targetClass.name.asString())
             return null
         }
 
@@ -171,7 +178,7 @@ class DefinitionCallBuilder(
 
         val koinFunction = findDefinitionWithKClass(Name.identifier(functionName), "org.koin.plugin.module.dsl", "Module")
         if (koinFunction == null) {
-            KoinPluginLogger.debug { "$functionName not found for Module receiver - function ${targetFunction.name} skipped" }
+            reportMissingDslArtifact(definition.definitionType, targetFunction.fqNameWhenAvailable?.asString() ?: targetFunction.name.asString())
             return null
         }
 
@@ -183,7 +190,7 @@ class DefinitionCallBuilder(
 
         val qualifier = qualifierExtractor.extractFromDeclaration(targetFunction)
 
-        return builder.irCall(koinFunction.symbol).apply {
+        val definitionCall = builder.irCall(koinFunction.symbol).apply {
             extensionReceiver = builder.irGet(moduleReceiver)
             putTypeArgument(0, returnTypeClass.defaultType)
 
@@ -204,6 +211,12 @@ class DefinitionCallBuilder(
                 targetFunction, returnTypeClass, moduleClass, builder, parentFunction, getterFunction
             )
             putValueArgument(2, definitionLambda)
+        }
+
+        return if (definition.bindings.isNotEmpty()) {
+            addBindings(definitionCall, definition.bindings, builder)
+        } else {
+            definitionCall
         }
     }
 
@@ -230,7 +243,7 @@ class DefinitionCallBuilder(
 
         val koinFunction = findDefinitionWithKClass(Name.identifier(functionName), "org.koin.plugin.module.dsl", "Module")
         if (koinFunction == null) {
-            KoinPluginLogger.debug { "$functionName not found for Module receiver - top-level function ${targetFunction.name} skipped" }
+            reportMissingDslArtifact(definition.definitionType, targetFunction.fqNameWhenAvailable?.asString() ?: targetFunction.name.asString())
             return null
         }
 
@@ -309,7 +322,7 @@ class DefinitionCallBuilder(
 
         val scopedFunction = findDefinitionWithKClass(Name.identifier(functionName), "org.koin.plugin.module.dsl", "ScopeDSL")
         if (scopedFunction == null) {
-            KoinPluginLogger.debug { "$functionName not found for ScopeDSL receiver - scoped ${targetClass.name} skipped" }
+            reportMissingDslArtifact(definition.definitionType, targetClass.fqNameWhenAvailable?.asString() ?: targetClass.name.asString())
             return null
         }
 
@@ -375,7 +388,7 @@ class DefinitionCallBuilder(
 
         val scopedFunction = findDefinitionWithKClass(Name.identifier(functionName), "org.koin.plugin.module.dsl", "ScopeDSL")
         if (scopedFunction == null) {
-            KoinPluginLogger.debug { "$functionName not found for ScopeDSL receiver - scoped function ${targetFunction.name} skipped" }
+            reportMissingDslArtifact(definition.definitionType, targetFunction.fqNameWhenAvailable?.asString() ?: targetFunction.name.asString())
             return null
         }
 
@@ -435,7 +448,7 @@ class DefinitionCallBuilder(
 
         val scopedFunction = findDefinitionWithKClass(Name.identifier(functionName), "org.koin.plugin.module.dsl", "ScopeDSL")
         if (scopedFunction == null) {
-            KoinPluginLogger.debug { "$functionName not found for ScopeDSL receiver - scoped top-level function ${targetFunction.name} skipped" }
+            reportMissingDslArtifact(definition.definitionType, targetFunction.fqNameWhenAvailable?.asString() ?: targetFunction.name.asString())
             return null
         }
 
@@ -509,6 +522,30 @@ class DefinitionCallBuilder(
         }
 
         return result
+    }
+
+    /**
+     * Emit a compile error (once per DefinitionType) when the DSL helper for a given
+     * annotation type cannot be resolved on the classpath. Fires only for annotations
+     * whose DSL lives in a satellite artifact (`@KoinViewModel` → `koin-core-viewmodel`,
+     * `@KoinWorker` → `koin-android-workmanager`). Without this, a user who has
+     * `koin-annotations` but forgot the matching runtime artifact would silently get
+     * skipped definitions and hit `NoDefinitionFoundException` only at runtime.
+     *
+     * Not emitted for SINGLE/FACTORY/SCOPED: their DSL lives in `koin-core`, which is
+     * a hard prerequisite for the annotations themselves resolving, so "missing"
+     * is degenerate. Also, `buildScoped` exists only on `ScopeDSL` — a null lookup for
+     * SCOPED on `Module` receiver is a structural dispatch fallthrough, not a missing
+     * artifact.
+     */
+    private fun reportMissingDslArtifact(definitionType: DefinitionType, skippedTarget: String) {
+        val diagnostic = when (definitionType) {
+            DefinitionType.VIEW_MODEL -> KoinDiagnostic.MissingViewModelArtifact(def = skippedTarget)
+            DefinitionType.WORKER -> KoinDiagnostic.MissingWorkerArtifact(def = skippedTarget)
+            else -> return
+        }
+        if (!reportedMissingArtifacts.add(definitionType)) return
+        KoinPluginLogger.report(diagnostic)
     }
 
     fun findDefinitionWithKClass(functionName: Name, packageName: String, receiverClassName: String): IrSimpleFunction? {

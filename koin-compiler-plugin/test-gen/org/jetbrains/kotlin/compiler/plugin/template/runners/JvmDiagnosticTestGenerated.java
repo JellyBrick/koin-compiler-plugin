@@ -21,6 +21,66 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   }
 
   @Test
+  @TestMetadata("call_site_param_arity_mismatch.kt")
+  public void testCall_site_param_arity_mismatch() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_arity_mismatch.kt");
+  }
+
+  @Test
+  @TestMetadata("call_site_param_dsl_missing_d006.kt")
+  public void testCall_site_param_dsl_missing_d006() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_dsl_missing_d006.kt");
+  }
+
+  @Test
+  @TestMetadata("call_site_param_missing_d006.kt")
+  public void testCall_site_param_missing_d006() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_missing_d006.kt");
+  }
+
+  @Test
+  @TestMetadata("call_site_param_no_injected_no_d006.kt")
+  public void testCall_site_param_no_injected_no_d006() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_no_injected_no_d006.kt");
+  }
+
+  @Test
+  @TestMetadata("call_site_param_nullable_ok.kt")
+  public void testCall_site_param_nullable_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_nullable_ok.kt");
+  }
+
+  @Test
+  @TestMetadata("call_site_param_ok.kt")
+  public void testCall_site_param_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_ok.kt");
+  }
+
+  @Test
+  @TestMetadata("call_site_param_type_mismatch.kt")
+  public void testCall_site_param_type_mismatch() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_type_mismatch.kt");
+  }
+
+  @Test
+  @TestMetadata("circular_dependency_broken_by_lazy.kt")
+  public void testCircular_dependency_broken_by_lazy() {
+    runTest("koin-compiler-plugin/testData/diagnostics/circular_dependency_broken_by_lazy.kt");
+  }
+
+  @Test
+  @TestMetadata("circular_dependency_direct.kt")
+  public void testCircular_dependency_direct() {
+    runTest("koin-compiler-plugin/testData/diagnostics/circular_dependency_direct.kt");
+  }
+
+  @Test
+  @TestMetadata("circular_dependency_transitive.kt")
+  public void testCircular_dependency_transitive() {
+    runTest("koin-compiler-plugin/testData/diagnostics/circular_dependency_transitive.kt");
+  }
+
+  @Test
   @TestMetadata("configuration_label_mismatch.kt")
   public void testConfiguration_label_mismatch() {
     runTest("koin-compiler-plugin/testData/diagnostics/configuration_label_mismatch.kt");
@@ -39,6 +99,18 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   }
 
   @Test
+  @TestMetadata("factory_suspend_fun_interface_d007.kt")
+  public void testFactory_suspend_fun_interface_d007() {
+    runTest("koin-compiler-plugin/testData/diagnostics/factory_suspend_fun_interface_d007.kt");
+  }
+
+  @Test
+  @TestMetadata("koin_configuration_modules_a3.kt")
+  public void testKoin_configuration_modules_a3() {
+    runTest("koin-compiler-plugin/testData/diagnostics/koin_configuration_modules_a3.kt");
+  }
+
+  @Test
   @TestMetadata("lazy_missing.kt")
   public void testLazy_missing() {
     runTest("koin-compiler-plugin/testData/diagnostics/lazy_missing.kt");
@@ -48,6 +120,18 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   @TestMetadata("missing_dependency.kt")
   public void testMissing_dependency() {
     runTest("koin-compiler-plugin/testData/diagnostics/missing_dependency.kt");
+  }
+
+  @Test
+  @TestMetadata("missing_viewmodel_artifact.kt")
+  public void testMissing_viewmodel_artifact() {
+    runTest("koin-compiler-plugin/testData/diagnostics/missing_viewmodel_artifact.kt");
+  }
+
+  @Test
+  @TestMetadata("missing_worker_artifact.kt")
+  public void testMissing_worker_artifact() {
+    runTest("koin-compiler-plugin/testData/diagnostics/missing_worker_artifact.kt");
   }
 
   @Test

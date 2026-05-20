@@ -1,0 +1,3 @@
+[Koin][KOIN-D006] testpkg.Greeter requires 1 injected param(s) but get<Greeter>() has no parametersOf(...) at the call site.
+  Expected @InjectedParam slots: name: kotlin.String
+  Pass them via parametersOf(...) inside the trailing lambda.
