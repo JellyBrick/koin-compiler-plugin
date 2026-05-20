@@ -164,11 +164,23 @@ class DefinitionCallBuilder(
     }
 
     /**
+     * Per-class constructor lookup cache. `targetClass.declarations.filterIsInstance<IrConstructor>()`
+     * walks every member of the class — for an adapter like `ExposedFormAdapter` (3 ports bound,
+     * ~30 `override fun`s) that's ~30 declarations skipped per call. The same class is queried
+     * once during codegen here and once during A2 validation in `BindingRegistry`
+     * (`extractRequirements`), so caching collapses two walks into one per compile.
+     *
+     * Null cache entries memoize "no constructor found" (rare — `primaryConstructor` is the
+     * default fallback). Use `containsKey` to distinguish miss from cached-null.
+     */
+    private val constructorLookupCache = java.util.WeakHashMap<IrClass, IrConstructor?>()
+
+    /**
      * Find the constructor to use for injection.
      * Prefers @Inject annotated constructor (JSR-330), otherwise uses primary constructor.
      */
     private fun findConstructorToUse(targetClass: IrClass): IrConstructor? {
-        // Look for @Inject annotated constructor (JSR-330 - jakarta.inject or javax.inject)
+        if (constructorLookupCache.containsKey(targetClass)) return constructorLookupCache[targetClass]
         val injectConstructor = targetClass.declarations
             .filterIsInstance<IrConstructor>()
             .firstOrNull { constructor ->
@@ -178,7 +190,9 @@ class DefinitionCallBuilder(
                 }
             }
 
-        return injectConstructor ?: targetClass.primaryConstructor
+        val result = injectConstructor ?: targetClass.primaryConstructor
+        constructorLookupCache[targetClass] = result
+        return result
     }
 
     /**

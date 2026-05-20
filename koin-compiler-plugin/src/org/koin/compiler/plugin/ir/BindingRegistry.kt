@@ -730,10 +730,21 @@ class BindingRegistry {
     }
 
     /**
+     * Per-class constructor lookup cache. Mirrors the cache in [DefinitionCallBuilder] but at
+     * BindingRegistry's lifecycle — each registry is short-lived (one per `validateModule` call),
+     * but inside a single validate pass [extractRequirements] is invoked per definition and the
+     * same class can flow through both `ClassDef` and `DslDef` branches, plus is hit again by
+     * cycle detection in the same pass before [requirementsByDef] absorbs it. Caching here is
+     * defense-in-depth.
+     */
+    private val constructorLookupCache = java.util.WeakHashMap<IrClass, org.jetbrains.kotlin.ir.declarations.IrConstructor?>()
+
+    /**
      * Find the constructor to use for injection.
      * Prefers @Inject annotated constructor, otherwise uses primary constructor.
      */
     private fun findConstructorToUse(targetClass: IrClass): org.jetbrains.kotlin.ir.declarations.IrConstructor? {
+        if (constructorLookupCache.containsKey(targetClass)) return constructorLookupCache[targetClass]
         val injectConstructor = targetClass.declarations
             .filterIsInstance<org.jetbrains.kotlin.ir.declarations.IrConstructor>()
             .firstOrNull { constructor ->
@@ -742,7 +753,9 @@ class BindingRegistry {
                     fqName == "jakarta.inject.Inject" || fqName == "javax.inject.Inject"
                 }
             }
-        return injectConstructor ?: targetClass.primaryConstructor
+        val result = injectConstructor ?: targetClass.primaryConstructor
+        constructorLookupCache[targetClass] = result
+        return result
     }
 
     private fun definitionDisplayName(def: Definition): String {

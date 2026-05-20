@@ -143,6 +143,20 @@ class QualifierExtractor(private val context: IrPluginContext) {
     }
 
     /**
+     * Per-class qualifier cache. The result depends only on the IrClass's annotations, which
+     * don't mutate during the IR pass, so we memoize. Callers hit this from three different
+     * code paths per class (Phase 1 ClassDef build, codegen `buildClassDefinitionCall`, hint
+     * emission `generateModuleScanHints`, plus a fallback from `discoverDefinitionsFromHints`
+     * when a cross-module hint lacks encoded qualifier metadata). For a 30-class PR that
+     * collapses ~120 annotation walks to ~30.
+     *
+     * Cached `null` is a real result (no qualifier) — use the cache *map* presence to
+     * distinguish "memoized miss" from "not yet looked up". `WeakHashMap` lets unused IrClasses
+     * fall out under GC, though in practice the IR pass holds them strongly.
+     */
+    private val extractFromClassCache = java.util.WeakHashMap<IrClass, QualifierValue?>()
+
+    /**
      * Extract qualifier from a class.
      * Convenience method that extracts qualifier with appropriate logging context.
      *
@@ -150,7 +164,10 @@ class QualifierExtractor(private val context: IrPluginContext) {
      * @return The qualifier value, or null if no qualifier annotation is present
      */
     fun extractFromClass(irClass: IrClass): QualifierValue? {
-        return extractFromDeclaration(irClass, "class ${irClass.name}")
+        if (extractFromClassCache.containsKey(irClass)) return extractFromClassCache[irClass]
+        val result = extractFromDeclaration(irClass, "class ${irClass.name}")
+        extractFromClassCache[irClass] = result
+        return result
     }
 
     /**

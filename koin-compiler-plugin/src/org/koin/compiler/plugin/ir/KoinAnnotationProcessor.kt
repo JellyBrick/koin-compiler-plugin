@@ -182,21 +182,42 @@ class KoinAnnotationProcessor(
                 val defClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
                 val defPackage = defClass.packageFqName?.asString() ?: continue
 
-                val hintBindings = params.filter { it.name.asString().startsWith("binding") }
-                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                val hintScopeClass = params.firstOrNull { it.name.asString() == "scope" }
-                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                val hintQualifier: QualifierValue? = run {
-                    val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
-                    if (qParam != null) {
-                        QualifierValue.StringQualifier(
-                            KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_"))
-                        )
-                    } else {
-                        val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
-                        (qTypeParam?.type?.classifierOrNull as? IrClassSymbol)?.owner
-                            ?.let { QualifierValue.TypeQualifier(it) }
+                // Single-pass scan over the remaining params (index 0 was the contributed target):
+                // older code did 4 separate .filter/.firstOrNull walks here, each calling
+                // `it.name.asString()` per param. For a hint with N params that was N*4 String
+                // allocations + N*4 startsWith/equals checks; collapsed to a single classifier
+                // per parameter.
+                var hintBindings: MutableList<IrClass>? = null
+                var hintScopeClass: IrClass? = null
+                var stringQualifierName: String? = null
+                var typeQualifierClass: IrClass? = null
+                for (i in 1 until params.size) {
+                    val p = params[i]
+                    val name = p.name.asString()
+                    when {
+                        name.startsWith("binding") -> {
+                            val c = (p.type.classifierOrNull as? IrClassSymbol)?.owner
+                            if (c != null) {
+                                (hintBindings ?: mutableListOf<IrClass>().also { hintBindings = it }).add(c)
+                            }
+                        }
+                        name == "scope" -> {
+                            hintScopeClass = (p.type.classifierOrNull as? IrClassSymbol)?.owner
+                        }
+                        name == "qualifierType" -> {
+                            typeQualifierClass = (p.type.classifierOrNull as? IrClassSymbol)?.owner
+                        }
+                        name.startsWith("qualifier_") -> {
+                            stringQualifierName = name.removePrefix("qualifier_")
+                        }
                     }
+                }
+                val hintQualifier: QualifierValue? = when {
+                    stringQualifierName != null -> QualifierValue.StringQualifier(
+                        KoinPluginConstants.unsanitizeQualifierName(stringQualifierName)
+                    )
+                    typeQualifierClass != null -> QualifierValue.TypeQualifier(typeQualifierClass)
+                    else -> null
                 }
 
                 byPackage.getOrPut(defPackage) { mutableListOf() }.add(
@@ -206,7 +227,7 @@ class KoinAnnotationProcessor(
                         defClass = defClass,
                         defPackage = defPackage,
                         defFqName = defClass.fqNameWhenAvailable?.asString(),
-                        hintBindings = hintBindings,
+                        hintBindings = hintBindings ?: emptyList(),
                         hintScopeClass = hintScopeClass,
                         hintQualifier = hintQualifier,
                     )
@@ -237,24 +258,44 @@ class KoinAnnotationProcessor(
                 val returnTypeClass = (paramType.classifierOrNull as? IrClassSymbol)?.owner ?: continue
                 val returnTypePackage = returnTypeClass.packageFqName?.asString() ?: continue
 
-                val funcPkgParam = params.firstOrNull { it.name.asString().startsWith("funcpkg_") }
-                val functionPackage = funcPkgParam?.name?.asString()?.removePrefix("funcpkg_")?.replace("_", ".")
-
-                val bindings = params.filter { it.name.asString().startsWith("binding") }
-                    .mapNotNull { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                val scopeClass = params.firstOrNull { it.name.asString() == "scope" }
-                    ?.let { (it.type.classifierOrNull as? IrClassSymbol)?.owner }
-                val qualifier: QualifierValue? = run {
-                    val qParam = params.firstOrNull { it.name.asString().startsWith("qualifier_") }
-                    if (qParam != null) {
-                        QualifierValue.StringQualifier(
-                            KoinPluginConstants.unsanitizeQualifierName(qParam.name.asString().removePrefix("qualifier_"))
-                        )
-                    } else {
-                        val qTypeParam = params.firstOrNull { it.name.asString() == "qualifierType" }
-                        (qTypeParam?.type?.classifierOrNull as? IrClassSymbol)?.owner
-                            ?.let { QualifierValue.TypeQualifier(it) }
+                // Single-pass scan over the remaining params — see the matching loop in
+                // `extractedDefHintsByPackage` for rationale. Adds `funcpkg_` matching since
+                // function hints carry the producer's own package as a parameter-name suffix.
+                var bindings: MutableList<IrClass>? = null
+                var scopeClass: IrClass? = null
+                var stringQualifierName: String? = null
+                var typeQualifierClass: IrClass? = null
+                var functionPackage: String? = null
+                for (i in 1 until params.size) {
+                    val p = params[i]
+                    val name = p.name.asString()
+                    when {
+                        name.startsWith("binding") -> {
+                            val c = (p.type.classifierOrNull as? IrClassSymbol)?.owner
+                            if (c != null) {
+                                (bindings ?: mutableListOf<IrClass>().also { bindings = it }).add(c)
+                            }
+                        }
+                        name == "scope" -> {
+                            scopeClass = (p.type.classifierOrNull as? IrClassSymbol)?.owner
+                        }
+                        name == "qualifierType" -> {
+                            typeQualifierClass = (p.type.classifierOrNull as? IrClassSymbol)?.owner
+                        }
+                        name.startsWith("qualifier_") -> {
+                            stringQualifierName = name.removePrefix("qualifier_")
+                        }
+                        name.startsWith("funcpkg_") -> {
+                            functionPackage = name.removePrefix("funcpkg_").replace("_", ".")
+                        }
                     }
+                }
+                val qualifier: QualifierValue? = when {
+                    stringQualifierName != null -> QualifierValue.StringQualifier(
+                        KoinPluginConstants.unsanitizeQualifierName(stringQualifierName)
+                    )
+                    typeQualifierClass != null -> QualifierValue.TypeQualifier(typeQualifierClass)
+                    else -> null
                 }
 
                 val candidates = if (functionPackage != null && functionPackage != returnTypePackage)
@@ -270,7 +311,7 @@ class KoinAnnotationProcessor(
                         returnTypePackage = returnTypePackage,
                         returnTypeFqName = returnTypeClass.fqNameWhenAvailable,
                         scanCandidatePackages = candidates,
-                        bindings = bindings,
+                        bindings = bindings ?: emptyList(),
                         scopeClass = scopeClass,
                         qualifier = qualifier,
                     )
