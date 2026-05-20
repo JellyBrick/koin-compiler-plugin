@@ -45,6 +45,33 @@ class DefinitionCallBuilder(
     private val kClassClass by lazy { context.referenceClass(ClassId.topLevel(KoinAnnotationFqNames.KCLASS))?.owner }
 
     /**
+     * Per-builder cache for [findDefinitionWithKClass]. The seven call sites in this file
+     * (buildClassDefinitionCall, buildFunctionDefinitionCall, buildTopLevelFunctionDefinitionCall,
+     *  buildScopedClassDefinitionCall, buildScopedFunctionDefinitionCall,
+     *  buildScopedTopLevelFunctionDefinitionCall, plus the original) resolve at most 10 unique
+     * (functionName × receiverClassName) tuples ("buildSingle"/"buildFactory"/"buildScoped"/
+     * "buildViewModel"/"buildWorker" × "Module"/"ScopeDSL"), but each is invoked once per
+     * definition. For a `@ComponentScan` module with 70+ `@Factory` classes that meant 70+
+     * symbol-table scans of "buildFactory" + 70+ `filterIsInstance` + signature-shape walks
+     * over its candidate list. Caching collapses this to one lookup per unique tuple per
+     * compile.
+     *
+     * Triple key keeps the cache safe if a future caller ever requests a different package
+     * (today they all live in `org.koin.plugin.module.dsl`, but the API allows otherwise).
+     * Null cache entries memoize "not found" so we don't re-scan when the runtime artifact
+     * is missing.
+     */
+    private val definitionLookupCache = mutableMapOf<Triple<String, String, String>, IrSimpleFunction?>()
+
+    /** Cache for the single-shot `bind` extension function — same lookup runs per `bindings`-bearing definition. */
+    private val bindFunctionCache: IrSimpleFunction? by lazy {
+        @Suppress("DEPRECATION")
+        context.referenceFunctions(
+            CallableId(FqName("org.koin.plugin.module.dsl"), Name.identifier("bind"))
+        ).firstOrNull()?.owner
+    }
+
+    /**
      * Tracks which DefinitionTypes have already produced a "missing artifact" error,
      * so we report once per compilation per definition type (not once per skipped definition).
      */
@@ -496,9 +523,9 @@ class DefinitionCallBuilder(
     ): IrExpression {
         var result = definitionCall
 
-        val bindFunction = context.referenceFunctions(
-            CallableId(FqName("org.koin.plugin.module.dsl"), Name.identifier("bind"))
-        ).firstOrNull()?.owner
+        // Cached per builder — the symbol-table scan for `bind` runs once per compile instead of
+        // once per definition that carries `bindings`.
+        val bindFunction = bindFunctionCache
 
         val kClass = kClassClass ?: return result
 
@@ -548,12 +575,20 @@ class DefinitionCallBuilder(
         KoinPluginLogger.report(diagnostic)
     }
 
+    @OptIn(DeprecatedForRemovalCompilerApi::class)
     fun findDefinitionWithKClass(functionName: Name, packageName: String, receiverClassName: String): IrSimpleFunction? {
+        // Memoize: the same (functionName × packageName × receiverClassName) triple resolves to the
+        // same IrSimpleFunction for the entire compile. See [definitionLookupCache] for why this
+        // matters for large @ComponentScan modules. `containsKey` lets us distinguish "cached
+        // null" (memoized miss) from "not yet looked up".
+        val key = Triple(functionName.asString(), packageName, receiverClassName)
+        if (definitionLookupCache.containsKey(key)) return definitionLookupCache[key]
+
         val functions = context.referenceFunctions(
             CallableId(FqName(packageName), functionName)
         )
 
-        return functions
+        val resolved = functions
             .map { it.owner }
             .filterIsInstance<IrSimpleFunction>()
             .firstOrNull { function ->
@@ -566,6 +601,8 @@ class DefinitionCallBuilder(
                 firstParamClass?.name?.asString() == "KClass" &&
                 secondParamClass?.name?.asString() == "Qualifier"
             }
+        definitionLookupCache[key] = resolved
+        return resolved
     }
 
     /**

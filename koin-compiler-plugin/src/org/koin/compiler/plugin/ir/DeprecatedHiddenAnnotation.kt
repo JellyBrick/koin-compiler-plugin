@@ -11,6 +11,10 @@ import org.jetbrains.kotlin.ir.expressions.impl.IrAnnotationImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrGetEnumValueImpl
 import org.jetbrains.kotlin.ir.expressions.impl.fromSymbolOwner
+import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
+import org.jetbrains.kotlin.ir.symbols.IrConstructorSymbol
+import org.jetbrains.kotlin.ir.symbols.IrEnumEntrySymbol
+import org.jetbrains.kotlin.ir.types.IrType
 import org.jetbrains.kotlin.ir.types.defaultType
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
@@ -32,59 +36,111 @@ fun IrSimpleFunction.addDeprecatedHiddenAnnotation(context: IrPluginContext) {
 }
 
 /**
- * Build an `IrConstructorCall` representing `@Deprecated(message = "...", level = DeprecationLevel.HIDDEN)`.
- * Returns null if the Deprecated class cannot be resolved.
+ * Resolved symbols + types needed to construct `@Deprecated(..., level = HIDDEN)` annotations.
  *
- * Made internal so callers can build a shared annotation instance for batch hint generation,
- * avoiding per-function IR allocation when all hint functions need the same annotation.
+ * Symbol-table lookups (`referenceClass`) and `declarations.filterIsInstance<...>().firstOrNull`
+ * walks are not free — `kotlin.Deprecated` has many constructors and `DeprecationLevel` enumerates
+ * 4 entries. For a module with 70 `@Factory` we emit 70+ hint functions, so the un-cached form
+ * paid that resolution 70+ times per module. The IR validator rejects sharing the same
+ * `IrConstructorCall` instance ("Duplicate IR node"), so we cache only the lookup results and
+ * still allocate a fresh `IrConstructorCall` per annotation site — the per-call work shrinks from
+ * (referenceClass × 2 + declarations walk × 2 + IR alloc) to (IR alloc).
+ *
+ * Keyed by `IrPluginContext` identity so each IR pass / plugin instantiation gets its own cache.
+ * Concurrent compile invocations from different daemons run with separate contexts so there's no
+ * cross-compilation pollution.
  */
-@OptIn(DeprecatedForRemovalCompilerApi::class)
-internal fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstructorCall? {
-    // Resolve kotlin.Deprecated class
-    val deprecatedClassSymbol = context.referenceClass(StandardClassIds.Annotations.Deprecated) ?: return null
-    val deprecatedClass = deprecatedClassSymbol.owner
+private class DeprecatedHiddenAnnotationTemplate(
+    val deprecatedClassSymbol: IrClassSymbol,
+    val deprecatedType: IrType,
+    val constructorSymbol: IrConstructorSymbol,
+    val deprecationLevelType: IrType,
+    val hiddenEntrySymbol: IrEnumEntrySymbol,
+    val messageType: IrType,
+)
 
-    // Find the primary constructor (message: String, replaceWith: ReplaceWith, level: DeprecationLevel)
-    val constructor = deprecatedClass.declarations
+private val templateCache = java.util.WeakHashMap<IrPluginContext, DeprecatedHiddenAnnotationTemplate?>()
+
+@OptIn(DeprecatedForRemovalCompilerApi::class)
+private fun resolveTemplate(context: IrPluginContext): DeprecatedHiddenAnnotationTemplate? {
+    // WeakHashMap.computeIfAbsent doesn't tolerate null returns, so do the get/put dance manually.
+    if (templateCache.containsKey(context)) return templateCache[context]
+
+    val deprecatedClassSymbol = context.referenceClass(StandardClassIds.Annotations.Deprecated)
+    if (deprecatedClassSymbol == null) {
+        templateCache[context] = null
+        return null
+    }
+    val constructor = deprecatedClassSymbol.owner.declarations
         .filterIsInstance<IrConstructor>()
         .firstOrNull { it.isPrimary }
-        ?: return null
+    if (constructor == null) {
+        templateCache[context] = null
+        return null
+    }
 
-    // Resolve DeprecationLevel enum for HIDDEN entry
     val deprecationLevelClassId = ClassId(FqName("kotlin"), Name.identifier("DeprecationLevel"))
-    val deprecationLevelClassSymbol = context.referenceClass(deprecationLevelClassId) ?: return null
+    val deprecationLevelClassSymbol = context.referenceClass(deprecationLevelClassId)
+    if (deprecationLevelClassSymbol == null) {
+        templateCache[context] = null
+        return null
+    }
     val hiddenEntry = deprecationLevelClassSymbol.owner.declarations
         .filterIsInstance<IrEnumEntry>()
         .firstOrNull { it.name.asString() == "HIDDEN" }
-        ?: return null
+    if (hiddenEntry == null) {
+        templateCache[context] = null
+        return null
+    }
+
+    val template = DeprecatedHiddenAnnotationTemplate(
+        deprecatedClassSymbol = deprecatedClassSymbol,
+        deprecatedType = deprecatedClassSymbol.defaultType,
+        constructorSymbol = constructor.symbol,
+        deprecationLevelType = deprecationLevelClassSymbol.defaultType,
+        hiddenEntrySymbol = hiddenEntry.symbol,
+        messageType = context.irBuiltIns.stringType,
+    )
+    templateCache[context] = template
+    return template
+}
+
+/**
+ * Build an `IrConstructorCall` representing `@Deprecated(message = "...", level = DeprecationLevel.HIDDEN)`.
+ * Returns null if the Deprecated class cannot be resolved.
+ *
+ * Symbol-table lookups go through a per-`IrPluginContext` cache (see [resolveTemplate]), so the
+ * first call per compile pays the resolution cost and every subsequent call reuses it. The
+ * resulting `IrConstructorCall` is still a fresh allocation per annotation site — the IR
+ * validator rejects sharing the same node across functions.
+ */
+@OptIn(DeprecatedForRemovalCompilerApi::class)
+internal fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstructorCall? {
+    val tpl = resolveTemplate(context) ?: return null
 
     val messageExpr = IrConstImpl.string(
         UNDEFINED_OFFSET, UNDEFINED_OFFSET,
-        context.irBuiltIns.stringType,
+        tpl.messageType,
         "Koin compiler plugin internal hint function"
     )
-
     val levelExpr = IrGetEnumValueImpl(
         UNDEFINED_OFFSET, UNDEFINED_OFFSET,
-        deprecationLevelClassSymbol.defaultType,
-        hiddenEntry.symbol
+        tpl.deprecationLevelType,
+        tpl.hiddenEntrySymbol
     )
 
-    // Build the annotation using IrAnnotationImpl
     return IrAnnotationImpl.fromSymbolOwner(
         UNDEFINED_OFFSET,
         UNDEFINED_OFFSET,
-        deprecatedClassSymbol.defaultType,
-        constructor.symbol
+        tpl.deprecatedType,
+        tpl.constructorSymbol
     ).apply {
-        // Set positional value arguments (used by codegen)
-        // arg 0: message (String)
+        // Positional value arguments (used by codegen)
+        // arg 0: message (String); arg 1: replaceWith (defaulted); arg 2: level (DeprecationLevel.HIDDEN)
         putValueArgument(0, messageExpr)
-        // arg 1: replaceWith — leave as default (null)
-        // arg 2: level (DeprecationLevel.HIDDEN)
         putValueArgument(2, levelExpr)
 
-        // Also set argument mapping (used by IR annotation processing and metadata serialization)
+        // Argument mapping (used by IR annotation processing and metadata serialization)
         argumentMapping = mapOf(
             Name.identifier("message") to messageExpr,
             Name.identifier("level") to levelExpr

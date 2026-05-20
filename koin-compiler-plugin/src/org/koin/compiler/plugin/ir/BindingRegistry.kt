@@ -304,16 +304,44 @@ class BindingRegistry {
         unresolvedCollector: MutableList<UnresolvedDependency>? = null,
         reportedCycles: MutableSet<String>? = null,
     ): Int {
-        // Build the set of provided types from ALL definitions
+        // Unified provider-graph construction. The validate path needs `providedTypes` and a
+        // FqName-indexed `providersByFqName`; cycle detection needs `primaryToDef` (so a binding
+        // requirement can be routed back to its defining definition) and `keyToPrimary`. The
+        // previous implementation built `providedTypes` + `providersByFqName` here, then
+        // `detectCycles` rebuilt `primaryToDef` + `keyToPrimary` over the same definitions. For
+        // large @ComponentScan modules (70+ defs × several bindings) that doubled the per-def
+        // ProviderKey allocation and the qualifier-extraction work. Build all four indexes in a
+        // single pass and hand them to [detectCycles].
         val providedTypes = mutableSetOf<ProviderKey>()
+        val providersByFqName = mutableMapOf<String, MutableList<ProviderKey>>()
+        val primaryToDef = mutableMapOf<ProviderKey, Definition>()
+        val keyToPrimary = mutableMapOf<ProviderKey, ProviderKey>()
+
+        fun indexProvider(key: ProviderKey) {
+            key.typeKey.fqName?.asString()?.let {
+                providersByFqName.getOrPut(it) { mutableListOf() }.add(key)
+            }
+            key.typeKey.classId?.asFqNameString()?.let { classIdStr ->
+                if (classIdStr != key.typeKey.fqName?.asString()) {
+                    providersByFqName.getOrPut(classIdStr) { mutableListOf() }.add(key)
+                }
+            }
+        }
 
         for (def in definitions) {
             val typeKey = typeKeyFromDefinition(def)
             val qualifier = extractQualifierFromDefinition(def, qualifierExtractor)
             val scopeClass = def.scopeClass
+            val primary = ProviderKey(typeKey, qualifier, scopeClass)
 
-            // The definition provides its own type
-            providedTypes.add(ProviderKey(typeKey, qualifier, scopeClass))
+            if (providedTypes.add(primary)) {
+                indexProvider(primary)
+            }
+            // First-wins for primary-to-def: matches the legacy `detectCycles` behavior where
+            // duplicate definitions of the same primary key collapse to the first.
+            primaryToDef.putIfAbsent(primary, def)
+            keyToPrimary.putIfAbsent(primary, primary)
+
             val scopeStr = scopeClass?.fqNameWhenAvailable?.asString()?.let { " (scope=$it)" } ?: ""
             val qualifierStr = when (qualifier) {
                 is QualifierValue.StringQualifier -> " @Named(\"${qualifier.name}\")"
@@ -328,22 +356,22 @@ class BindingRegistry {
                     classId = ParameterAnalyzer.classIdFromIrClass(binding),
                     fqName = binding.fqNameWhenAvailable
                 )
-                providedTypes.add(ProviderKey(bindingTypeKey, qualifier, scopeClass))
+                val bindingKey = ProviderKey(bindingTypeKey, qualifier, scopeClass)
+                if (providedTypes.add(bindingKey)) {
+                    indexProvider(bindingKey)
+                }
+                keyToPrimary.putIfAbsent(bindingKey, primary)
                 KoinPluginLogger.debug { "    provides (binding): ${bindingTypeKey.render()}$qualifierStr$scopeStr" }
             }
         }
 
-        // Build indexed lookup for O(1) provider matching by FqName/ClassId string.
-        // This avoids iterating all providers for every requirement in findProvider().
-        val providersByFqName = mutableMapOf<String, MutableList<ProviderKey>>()
-        for (provider in providedTypes) {
-            provider.typeKey.fqName?.asString()?.let { fqName ->
-                providersByFqName.getOrPut(fqName) { mutableListOf() }.add(provider)
-            }
-            provider.typeKey.classId?.asFqNameString()?.let { classIdStr ->
-                providersByFqName.getOrPut(classIdStr) { mutableListOf() }.add(provider)
-            }
-        }
+        // Memoize extractRequirements per Definition: the same definition's constructor params
+        // are re-analyzed by [detectCycles] downstream. With 70 defs × ~4 params that's ~280
+        // ParameterAnalyzer calls — paying it twice doubles A2's parameter-analysis cost.
+        val requirementsByDef = HashMap<Definition, List<Requirement>>(definitions.size)
+
+        fun requirementsFor(def: Definition): List<Requirement> =
+            requirementsByDef.getOrPut(def) { extractRequirements(def, parameterAnalyzer) }
 
         // Only validate requirements from the specified subset (or all if not specified)
         val toValidate = definitionsToValidate ?: definitions
@@ -354,7 +382,7 @@ class BindingRegistry {
         // Validate each definition's requirements
         var errorCount = 0
         for (def in toValidate) {
-            val requirements = extractRequirements(def, parameterAnalyzer)
+            val requirements = requirementsFor(def)
             val defName = definitionDisplayName(def)
             val defScopeClass = def.scopeClass
             KoinPluginLogger.debug { "    validating: $defName (${requirements.size} requirements)" }
@@ -417,8 +445,16 @@ class BindingRegistry {
 
         // Cycle detection runs over the full provider set (not just toValidate) so a back-edge
         // through an already-validated definition still surfaces. Dedup happens via [reportedCycles]
-        // so the same cycle isn't reported at both A2 and A3.
-        val cycleErrors = detectCycles(definitions, parameterAnalyzer, qualifierExtractor, reportedCycles)
+        // so the same cycle isn't reported at both A2 and A3. Hand over the unified indexes built
+        // above so cycle detection doesn't redo the per-def ProviderKey + qualifier-extraction +
+        // parameter-analysis work.
+        val cycleErrors = detectCycles(
+            primaryToDef = primaryToDef,
+            keyToPrimary = keyToPrimary,
+            providersByFqName = providersByFqName,
+            requirementsFor = ::requirementsFor,
+            reportedCycles = reportedCycles,
+        )
         errorCount += cycleErrors
 
         if (errorCount == 0) {
@@ -451,53 +487,28 @@ class BindingRegistry {
      * @return number of NEW cycles reported (after dedup).
      */
     private fun detectCycles(
-        definitions: List<Definition>,
-        parameterAnalyzer: ParameterAnalyzer,
-        qualifierExtractor: QualifierExtractor,
+        primaryToDef: Map<ProviderKey, Definition>,
+        keyToPrimary: Map<ProviderKey, ProviderKey>,
+        providersByFqName: Map<String, MutableList<ProviderKey>>,
+        requirementsFor: (Definition) -> List<Requirement>,
         reportedCycles: MutableSet<String>?,
     ): Int {
-        if (definitions.isEmpty()) return 0
-
-        // primary key (own type) -> definition; binding keys -> primary (so a binding requirement
-        // routes to the owning definition).
-        val primaryToDef = mutableMapOf<ProviderKey, Definition>()
-        val keyToPrimary = mutableMapOf<ProviderKey, ProviderKey>()
-
-        for (def in definitions) {
-            val typeKey = typeKeyFromDefinition(def)
-            val qualifier = extractQualifierFromDefinition(def, qualifierExtractor)
-            val scopeClass = def.scopeClass
-            val primary = ProviderKey(typeKey, qualifier, scopeClass)
-            if (primaryToDef.putIfAbsent(primary, def) == null) {
-                keyToPrimary[primary] = primary
-                for (binding in def.bindings) {
-                    val bindingKey = ProviderKey(
-                        TypeKey(
-                            classId = ParameterAnalyzer.classIdFromIrClass(binding),
-                            fqName = binding.fqNameWhenAvailable,
-                        ),
-                        qualifier,
-                        scopeClass,
-                    )
-                    keyToPrimary.putIfAbsent(bindingKey, primary)
-                }
-            }
-        }
-
-        if (primaryToDef.size < 1) return 0
+        if (primaryToDef.isEmpty()) return 0
 
         // Adjacency: primary -> set of primary keys reachable in one step.
-        val allKeys = keyToPrimary.keys
+        // Lookups go through the FqName-indexed `providersByFqName` (built by validateModule)
+        // so each requirement is matched in O(bucket-size) instead of O(all-providers). For
+        // 70-def modules this changes cycle-detection edge enumeration from O(N²) to O(N).
         val adj = HashMap<ProviderKey, List<ProviderKey>>(primaryToDef.size)
         for ((primary, def) in primaryToDef) {
             val edges = LinkedHashSet<ProviderKey>()
-            for (req in extractRequirements(def, parameterAnalyzer)) {
+            for (req in requirementsFor(def)) {
                 if (!req.requiresValidation()) continue
                 if (req.isLazy) continue
                 val reqFqName = req.typeKey.fqName?.asString() ?: req.typeKey.classId?.asFqNameString()
                 if (reqFqName != null && ProvidedTypeRegistry.isProvided(reqFqName)) continue
                 if (reqFqName != null && isWhitelistedType(reqFqName)) continue
-                val matchedKey = findMatchingProvider(req, allKeys, def.scopeClass) ?: continue
+                val matchedKey = findMatchingProviderIndexed(req, providersByFqName, def.scopeClass) ?: continue
                 val target = keyToPrimary[matchedKey] ?: continue
                 edges += target
             }
@@ -578,26 +589,43 @@ class BindingRegistry {
      * in the graph. Mirrors [findProvider] but without debug logging (cycle scan walks every
      * edge — extra spam would drown the build log).
      */
-    private fun findMatchingProvider(
+    /**
+     * Indexed counterpart of [findProvider] that returns the matched [ProviderKey] (used by cycle
+     * detection to map a requirement to its resolving node) instead of a boolean. Uses the same
+     * `providersByFqName` map [validateModule] already built, so the lookup is O(bucket-size +
+     * scope/qualifier match) rather than O(all-providers). Mirrors [findProvider] but skips its
+     * debug logging — cycle scan walks every edge and extra spam would drown the build log.
+     */
+    private fun findMatchingProviderIndexed(
         req: Requirement,
-        providedTypes: Set<ProviderKey>,
+        providersByFqName: Map<String, List<ProviderKey>>,
         consumerScopeClass: IrClass?,
     ): ProviderKey? {
-        val reqFqName = req.typeKey.fqName
-        val reqClassId = req.typeKey.classId
+        val reqFqNameStr = req.typeKey.fqName?.asString()
+        val reqClassIdStr = req.typeKey.classId?.asFqNameString()
 
-        for (provider in providedTypes) {
-            val typeMatch = when {
-                reqFqName != null && provider.typeKey.fqName != null -> reqFqName == provider.typeKey.fqName
-                reqClassId != null && provider.typeKey.classId != null -> reqClassId == provider.typeKey.classId
-                else -> false
+        val primary = reqFqNameStr?.let { providersByFqName[it] }
+        if (primary != null) {
+            for (provider in primary) {
+                if (!qualifiersMatch(req.qualifier, provider.qualifier)) continue
+                val providerScope = provider.scopeClass
+                if (providerScope == null) return provider
+                if (consumerScopeClass != null && providerScope.fqNameWhenAvailable == consumerScopeClass.fqNameWhenAvailable) {
+                    return provider
+                }
             }
-            if (!typeMatch) continue
-            if (!qualifiersMatch(req.qualifier, provider.qualifier)) continue
-            val providerScope = provider.scopeClass
-            if (providerScope == null) return provider
-            if (consumerScopeClass != null && providerScope.fqNameWhenAvailable == consumerScopeClass.fqNameWhenAvailable) {
-                return provider
+        }
+        if (reqClassIdStr != null && reqClassIdStr != reqFqNameStr) {
+            val byClassId = providersByFqName[reqClassIdStr]
+            if (byClassId != null) {
+                for (provider in byClassId) {
+                    if (!qualifiersMatch(req.qualifier, provider.qualifier)) continue
+                    val providerScope = provider.scopeClass
+                    if (providerScope == null) return provider
+                    if (consumerScopeClass != null && providerScope.fqNameWhenAvailable == consumerScopeClass.fqNameWhenAvailable) {
+                        return provider
+                    }
+                }
             }
         }
         return null

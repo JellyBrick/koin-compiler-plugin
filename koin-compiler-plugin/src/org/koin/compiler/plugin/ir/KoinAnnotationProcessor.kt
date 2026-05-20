@@ -2694,12 +2694,32 @@ class KoinAnnotationProcessor(
 
     /**
      * Maximum number of root-scope definition statements to emit per method body.
-     * When exceeded, definitions are split into private helper functions to avoid
-     * the JVM 64KB method bytecode limit (MethodTooLargeException).
-     * Set high enough to avoid splitting small @Configuration modules (<20 @Single methods)
-     * while catching large @ComponentScan modules (25+ scanned definitions).
+     * When exceeded, definitions are split into private helper functions, each placed in its own
+     * synthetic IrFile (-> its own .class) to keep individual class files small (see
+     * [placeChunkHelperInSyntheticFile]).
+     *
+     * Why 100 (current): each `factory<T>() { T(get(), get(), ...) }` statement in the *outer*
+     * method body compiles to ~15–20 bytes — the lambda body lives in its own anonymous class
+     * (one per definition, unchanged by chunking), so the outer method only carries `ldc KClass`,
+     * `new+invokespecial Lambda`, `invokestatic factory`, `pop`. At 100 statements that's ~2 KB
+     * per method, two orders of magnitude under the 64 KB MethodTooLargeException ceiling and
+     * comfortably under the u2 constant-pool limit (~5 cp slots per statement × 100 = 500, vs.
+     * 65 535 ceiling).
+     *
+     * Why not 10 (original) / 30 (previous bump): each chunk becomes its own `.class` file that
+     * kotlinc has to IR-lower, bytecode-emit, *and* write Kotlin `@Metadata` annotations for.
+     * Metadata serialization in particular is heap-heavy — [BitEncoding.encodeBytes] runs through
+     * a StringBuilder, and the kotlin daemon has been observed OOM'ing on large
+     * `@ComponentScan` aggregator modules (200+ defs → 20+ chunk files at chunk=10). Cutting
+     * chunk count from N/10 to N/100 reduces synthetic-class processing 10× without trading any
+     * safety margin — the 64 KB method limit isn't reachable until ~3000 statements per chunk.
+     *
+     * The lambda-class count (one anonymous class per definition) is unchanged either way; only
+     * the wrapper-helper count moves. For a 70-`@Factory` module that's 7 → 1 helpers (zero
+     * helpers, definitions inline into module()), and the aggregator case (200+ defs from
+     * cross-module discovery) drops from 20+ helpers to 2–3.
      */
-    private val maxDefinitionsPerMethod = 10
+    private val maxDefinitionsPerMethod = 100
 
     private fun buildModuleCall(
         moduleDslFunction: IrSimpleFunction,
