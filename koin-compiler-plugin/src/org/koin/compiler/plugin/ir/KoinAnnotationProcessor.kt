@@ -350,7 +350,8 @@ class KoinAnnotationProcessor(
             // Use cached map for O(1) lookup instead of .find() linear scan
             val localIncluded = modulesByFqName[includedFqName]
             if (localIncluded != null) {
-                val newDefs = collectAllDefinitions(localIncluded).filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
+                val includedDefs = cachedModuleDefinitions?.get(localIncluded) ?: collectAllDefinitions(localIncluded)
+                val newDefs = includedDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in existingFqNames }
                 definitions.addAll(newDefs)
                 for (def in newDefs) { def.returnTypeClass.fqNameWhenAvailable?.let { existingFqNames.add(it) } }
             } else {
@@ -1827,7 +1828,9 @@ class KoinAnnotationProcessor(
     }
 
     private fun fillFunctionBody(function: IrSimpleFunction, moduleClass: ModuleClass) {
-        val definitions = collectAllDefinitions(moduleClass)
+        // Reuse the cache populated by `generateModuleExtensions` so we don't
+        // rerun matchingClasses + Definition rebuild per @Module body fill.
+        val definitions = cachedModuleDefinitions?.get(moduleClass) ?: collectAllDefinitions(moduleClass)
         KoinPluginLogger.debug { "  Filling body for ${moduleClass.irClass.name}.module(): ${definitions.size} definitions, ${moduleClass.includedModules.size} includes" }
 
         // Must generate body for FIR-generated functions even if no definitions
@@ -2035,6 +2038,7 @@ class KoinAnnotationProcessor(
         // Per-package iteration over the pre-extracted index: we only pay the param walk +
         // classifier lookup + qualifier decode for each hint function ONCE per compile (see
         // `extractedDefHintsByPackage`), even though this method is called per @Module.
+        if (extractedDefHintsByPackage.isEmpty() || scanPackages.isEmpty()) return emptyList()
         val discovered = mutableListOf<DefinitionClass>()
         for ((pkg, hints) in extractedDefHintsByPackage) {
             if (!matchesScanPackages(pkg, scanPackages)) continue
@@ -2243,8 +2247,8 @@ class KoinAnnotationProcessor(
             // Use cached map for O(1) lookup instead of .find() linear scan
             val localModuleClass = modulesByFqName[includedFqName]
             val newDefs = if (localModuleClass != null) {
-                // Included module is local — use collectAllDefinitions
-                val includedDefs = collectAllDefinitions(localModuleClass)
+                // Included module is local — reuse cached definitions when available
+                val includedDefs = cachedModuleDefinitions?.get(localModuleClass) ?: collectAllDefinitions(localModuleClass)
                 includedDefs.filter { it.returnTypeClass.fqNameWhenAvailable !in knownFqNames }
             } else {
                 // Included module from JAR — recursively collect
@@ -2543,9 +2547,20 @@ class KoinAnnotationProcessor(
 
     /** Check if a package matches any of the scan packages (exact or subpackage). */
     private fun matchesScanPackages(defPackage: String, scanPackages: List<String>): Boolean {
-        return scanPackages.any { scanPkg ->
-            defPackage == scanPkg || defPackage.startsWith("$scanPkg.")
+        // Hot path: called O(distinct-packages × N-modules-with-scan) per compile. Most projects
+        // hit the equality case first (matching the module's own package), so check that before
+        // the more expensive startsWith. Also short-circuit on empty scan-pkg to avoid the
+        // `"$scanPkg."` concat per call.
+        for (i in scanPackages.indices) {
+            val scanPkg = scanPackages[i]
+            if (defPackage == scanPkg) return true
+            if (scanPkg.isEmpty()) continue
+            if (defPackage.length > scanPkg.length &&
+                defPackage[scanPkg.length] == '.' &&
+                defPackage.startsWith(scanPkg)
+            ) return true
         }
+        return false
     }
 
     /**

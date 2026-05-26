@@ -68,7 +68,7 @@ class KoinIrExtension(
         // Phase 2: Transform single<T>() -> single(T::class, null) { T(get()) }
         // Also collects DSL definitions and pending call-site validations
         KoinPluginLogger.debug { "Phase 2: Transforming DSL calls" }
-        val koinTransformer = KoinDSLTransformer(pluginContext, lookupTracker)
+        val koinTransformer = KoinDSLTransformer(pluginContext, lookupTracker, qualifierExtractor)
         moduleFragment.transform(koinTransformer, null)
         val dslDefinitions = koinTransformer.dslDefinitions
         val pendingCallSites = koinTransformer.collectedCallSites

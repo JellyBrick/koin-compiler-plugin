@@ -37,7 +37,11 @@ import org.jetbrains.kotlin.ir.expressions.IrGetField
 @Suppress("DEPRECATION", "DEPRECATION_ERROR")
 class KoinDSLTransformer(
     private val context: IrPluginContext,
-    private val lookupTracker: LookupTracker? = null
+    private val lookupTracker: LookupTracker? = null,
+    // Optional shared QualifierExtractor so its per-class cache is reused with
+    // the annotation processor (which extracts qualifiers from the same IrClass
+    // set in Phase 1). Null = legacy behaviour (own instance).
+    sharedQualifierExtractor: QualifierExtractor? = null,
 ) : IrElementTransformerVoid() {
 
     private val unsafeDslChecksEnabled = KoinPluginLogger.unsafeDslChecksEnabled
@@ -64,8 +68,9 @@ class KoinDSLTransformer(
         return super.visitFile(declaration)
     }
 
-    // Qualifier extraction helper
-    private val qualifierExtractor = QualifierExtractor(context)
+    // Qualifier extraction helper. Reuses caller's instance when provided so the
+    // per-IrClass `extractFromClassCache` is shared with the annotation processor.
+    private val qualifierExtractor: QualifierExtractor = sharedQualifierExtractor ?: QualifierExtractor(context)
 
     // Reuse argument generator and lambda builder from the annotation processor infrastructure
     private val argumentGenerator = KoinArgumentGenerator(context, qualifierExtractor)
