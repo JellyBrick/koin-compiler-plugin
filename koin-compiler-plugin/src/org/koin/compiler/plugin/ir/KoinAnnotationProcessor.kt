@@ -971,7 +971,11 @@ class KoinAnnotationProcessor(
         // This replaces the FIR-time generation: IR has complete knowledge of all definitions
         // (including @Inject constructor classes in subpackages that FIR couldn't discover).
         // Uses registerFunctionAsMetadataVisible to make hints visible to downstream compilations.
-        generateModuleScanHints(moduleFragment, moduleDefinitions)
+        if (KoinPluginLogger.publishHintsEnabled) {
+            generateModuleScanHints(moduleFragment, moduleDefinitions)
+        } else {
+            KoinPluginLogger.debug { "generateModuleExtensions: skipping module scan hints (publishHints=false)" }
+        }
 
         // Map to track functions for each module class (FIR-generated or newly created)
         val moduleFunctions = mutableMapOf<ModuleClass, IrSimpleFunction>()

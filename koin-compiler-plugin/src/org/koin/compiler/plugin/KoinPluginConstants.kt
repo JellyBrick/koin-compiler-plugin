@@ -27,6 +27,9 @@ object KoinPluginConstants {
     /** Option to enable compile-time dependency safety checks. */
     const val OPTION_COMPILE_SAFETY = "compileSafety"
 
+    /** Option to publish synthetic hint metadata for downstream compile-safety consumers. */
+    const val OPTION_PUBLISH_HINTS = "publishHints"
+
     /** Option to append a single AI-assist CTA at the end of compilation if any Koin diagnostic fires. */
     const val OPTION_AI_ASSIST = "aiAssist"
 

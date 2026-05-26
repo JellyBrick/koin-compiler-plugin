@@ -59,6 +59,15 @@ open class KoinGradleExtension(objectFactory: ObjectFactory) {
     val compileSafety: Property<Boolean> = objectFactory.property(Boolean::class.java).convention(true)
 
     /**
+     * Publish synthetic hint metadata for downstream compile-safety consumers (default: true).
+     *
+     * Set to false only on leaf/aggregator modules that no downstream module compiles against.
+     * Local compileSafety validation still runs; the plugin only skips the metadata-visible
+     * hint functions under `org.koin.plugin.hints`.
+     */
+    val publishHints: Property<Boolean> = objectFactory.property(Boolean::class.java).convention(true)
+
+    /**
      * Force the safety pass to always run, bypassing Kotlin's incremental compilation cache.
      *
      * When left unset (the default), the Gradle plugin scans source files for `startKoin`,

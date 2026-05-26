@@ -1592,6 +1592,11 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
             callableIds.add(CallableId(packageFqName, MODULE_FUNCTION_NAME))
         }
 
+        if (!KoinPluginLogger.publishHintsEnabled) {
+            log { "getTopLevelCallableIds(): skipping hint callables (publishHints=false)" }
+            return callableIds
+        }
+
         // Generate hint functions for @Configuration modules (cross-module discovery)
         // One function per label per configuration module in the hints package
         // Example: @Configuration("test", "prod") generates configuration_test and configuration_prod
@@ -1649,6 +1654,10 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         callableId: CallableId,
         context: MemberGenerationContext?
     ): List<FirNamedFunctionSymbol> {
+        if (callableId.packageName == HINTS_PACKAGE && !KoinPluginLogger.publishHintsEnabled) {
+            return emptyList()
+        }
+
         // Generate hint functions for @Configuration modules
         // Function name is label-specific: configuration_<label>
         if (callableId.packageName == HINTS_PACKAGE) {

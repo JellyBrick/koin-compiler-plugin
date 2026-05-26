@@ -77,6 +77,10 @@ object KoinPluginLogger {
         private set
 
     @Volatile
+    var publishHintsEnabled: Boolean = true
+        private set
+
+    @Volatile
     var aiAssistEnabled: Boolean = false
         private set
 
@@ -142,7 +146,18 @@ object KoinPluginLogger {
      * stay scoped) and to the volatile fallback (for callers reached outside the compilation
      * thread group — primarily the legacy [KoinPluginMessageCollector] alias).
      */
-    fun init(collector: MessageCollector, userLogs: Boolean, debugLogs: Boolean, unsafeDslChecks: Boolean = true, skipDefaultValues: Boolean = true, compileSafety: Boolean = true, aiAssist: Boolean = true, moduleId: String? = null, lookupTracker: LookupTracker? = null) {
+    fun init(
+        collector: MessageCollector,
+        userLogs: Boolean,
+        debugLogs: Boolean,
+        unsafeDslChecks: Boolean = true,
+        skipDefaultValues: Boolean = true,
+        compileSafety: Boolean = true,
+        publishHints: Boolean = true,
+        aiAssist: Boolean = true,
+        moduleId: String? = null,
+        lookupTracker: LookupTracker? = null,
+    ) {
         threadCollector.set(collector)
         fallbackCollector = collector
         userLogsEnabled = userLogs
@@ -150,6 +165,7 @@ object KoinPluginLogger {
         unsafeDslChecksEnabled = unsafeDslChecks
         skipDefaultValuesEnabled = skipDefaultValues
         compileSafetyEnabled = compileSafety
+        publishHintsEnabled = publishHints
         aiAssistEnabled = aiAssist
         this.moduleId = moduleId?.takeIf { it.isNotBlank() }
         this.lookupTracker = lookupTracker
@@ -310,6 +326,7 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
         val unsafeDslChecks = configuration.get(KoinConfigurationKeys.UNSAFE_DSL_CHECKS, true)
         val skipDefaultValues = configuration.get(KoinConfigurationKeys.SKIP_DEFAULT_VALUES, true)
         val compileSafety = configuration.get(KoinConfigurationKeys.COMPILE_SAFETY, true)
+        val publishHints = configuration.get(KoinConfigurationKeys.PUBLISH_HINTS, true)
         val aiAssist = configuration.get(KoinConfigurationKeys.AI_ASSIST, true)
         val moduleId = configuration.get(KoinConfigurationKeys.MODULE_ID)
 
@@ -317,7 +334,18 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
         val lookupTracker = configuration.get(CommonConfigurationKeys.LOOKUP_TRACKER)
 
         // Initialize the centralized logger (includes lookupTracker for FIR-level IC recording)
-        KoinPluginLogger.init(messageCollector, userLogs, debugLogs, unsafeDslChecks, skipDefaultValues, compileSafety, aiAssist, moduleId, lookupTracker)
+        KoinPluginLogger.init(
+            messageCollector,
+            userLogs,
+            debugLogs,
+            unsafeDslChecks,
+            skipDefaultValues,
+            compileSafety,
+            publishHints,
+            aiAssist,
+            moduleId,
+            lookupTracker,
+        )
         val expectActualTracker = configuration.get(
             CommonConfigurationKeys.EXPECT_ACTUAL_TRACKER,
             ExpectActualTracker.DoNothing

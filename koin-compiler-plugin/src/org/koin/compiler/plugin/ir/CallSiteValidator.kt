@@ -90,6 +90,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
         annotationProcessor: KoinAnnotationProcessor?,
         dslHintGenerator: DslHintGenerator,
         injectedParamHints: InjectedParamHintGenerator? = null,
+        publishHints: Boolean = true,
     ) {
         val hasFullGraph = assembledGraphTypes.isNotEmpty()
 
@@ -164,7 +165,14 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 val isExternalType = callSite.targetClass.origin == IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB
                 if (isExternalType || dslDefinitions.isEmpty()) {
                     unresolvedCallSites.add(callSite)
-                    KoinPluginLogger.debug { "A4: Deferred ${callSite.callFunctionName}<${callSite.targetFqName}>() — will generate call-site hint (external=$isExternalType)" }
+                    KoinPluginLogger.debug {
+                        "A4: Deferred ${callSite.callFunctionName}<${callSite.targetFqName}>() " +
+                            if (publishHints) {
+                                "- will generate call-site hint (external=$isExternalType)"
+                            } else {
+                                "- hint publication disabled (external=$isExternalType)"
+                            }
+                    }
                     continue
                 }
             }
@@ -181,8 +189,12 @@ class CallSiteValidator(private val context: IrPluginContext) {
 
         // Generate call-site hints for unresolved types (deferred validation)
         if (unresolvedCallSites.isNotEmpty()) {
-            KoinPluginLogger.debug { "Phase 3.5: Generating ${unresolvedCallSites.size} call-site hints for deferred validation" }
-            generateCallSiteHints(moduleFragment, unresolvedCallSites)
+            if (publishHints) {
+                KoinPluginLogger.debug { "Phase 3.5: Generating ${unresolvedCallSites.size} call-site hints for deferred validation" }
+                generateCallSiteHints(moduleFragment, unresolvedCallSites)
+            } else {
+                KoinPluginLogger.debug { "Phase 3.5: Skipping ${unresolvedCallSites.size} call-site hints (publishHints=false)" }
+            }
         }
     }
 

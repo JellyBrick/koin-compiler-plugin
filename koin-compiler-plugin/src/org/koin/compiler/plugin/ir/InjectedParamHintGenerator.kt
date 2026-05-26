@@ -83,6 +83,7 @@ class InjectedParamHintGenerator(
     fun generateAndIndexHints(
         moduleFragment: IrModuleFragment,
         definitions: List<Definition>,
+        publishHints: Boolean = true,
     ) {
         if (definitions.isEmpty()) return
 
@@ -110,7 +111,8 @@ class InjectedParamHintGenerator(
             if (shapes.size > 1) ambiguousTargets.add(target)
         }
 
-        // Second pass: only index + emit hints for non-ambiguous targets.
+        // Second pass: always index local non-ambiguous targets; emit metadata hints only
+        // when this module publishes hints for downstream consumers.
         for ((def, targetClass, slots) in resolvedDefs) {
             val targetFqName = targetClass.fqNameWhenAvailable?.asString() ?: continue
             if (targetFqName in ambiguousTargets) {
@@ -118,11 +120,16 @@ class InjectedParamHintGenerator(
                 continue
             }
             localSlots.putIfAbsent(targetFqName, slots)
-            emitHintFunction(moduleFragment, def, targetClass, targetFqName, slots)
+            if (publishHints) {
+                emitHintFunction(moduleFragment, def, targetClass, targetFqName, slots)
+            }
         }
 
         if (localSlots.isNotEmpty()) {
-            KoinPluginLogger.debug { "InjectedParam hints: indexed ${localSlots.size} definition(s) with @InjectedParam" }
+            KoinPluginLogger.debug {
+                "InjectedParam hints: indexed ${localSlots.size} definition(s) with @InjectedParam" +
+                    if (publishHints) "" else " (metadata emission skipped)"
+            }
         }
     }
 

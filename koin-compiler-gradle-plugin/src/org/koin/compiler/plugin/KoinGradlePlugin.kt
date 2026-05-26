@@ -19,6 +19,7 @@ class KoinGradlePlugin : KotlinCompilerPluginSupportPlugin {
         const val OPTION_UNSAFE_DSL_CHECKS = "unsafeDslChecks"
         const val OPTION_SKIP_DEFAULT_VALUES = "skipDefaultValues"
         const val OPTION_COMPILE_SAFETY = "compileSafety"
+        const val OPTION_PUBLISH_HINTS = "publishHints"
         const val OPTION_AI_ASSIST = "aiAssist"
         const val OPTION_MODULE_ID = "moduleId"
     }
@@ -134,6 +135,7 @@ class KoinGradlePlugin : KotlinCompilerPluginSupportPlugin {
                 SubpluginOption(OPTION_UNSAFE_DSL_CHECKS, extension.unsafeDslChecks.get().toString()),
                 SubpluginOption(OPTION_SKIP_DEFAULT_VALUES, extension.skipDefaultValues.get().toString()),
                 SubpluginOption(OPTION_COMPILE_SAFETY, effectiveCompileSafety.toString()),
+                SubpluginOption(OPTION_PUBLISH_HINTS, extension.publishHints.get().toString()),
                 SubpluginOption(OPTION_AI_ASSIST, extension.aiAssist.get().toString()),
                 SubpluginOption(OPTION_MODULE_ID, moduleId)
             )

@@ -16,6 +16,7 @@ object KoinConfigurationKeys {
     val UNSAFE_DSL_CHECKS: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.unsafeDslChecks")
     val SKIP_DEFAULT_VALUES: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.skipDefaultValues")
     val COMPILE_SAFETY: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.compileSafety")
+    val PUBLISH_HINTS: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.publishHints")
     val AI_ASSIST: CompilerConfigurationKey<Boolean> = CompilerConfigurationKey.create("koin.aiAssist")
     val MODULE_ID: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("koin.moduleId")
 }
@@ -29,6 +30,7 @@ class KoinCommandLineProcessor : CommandLineProcessor {
         const val OPTION_UNSAFE_DSL_CHECKS = KoinPluginConstants.OPTION_UNSAFE_DSL_CHECKS
         const val OPTION_SKIP_DEFAULT_VALUES = KoinPluginConstants.OPTION_SKIP_DEFAULT_VALUES
         const val OPTION_COMPILE_SAFETY = KoinPluginConstants.OPTION_COMPILE_SAFETY
+        const val OPTION_PUBLISH_HINTS = KoinPluginConstants.OPTION_PUBLISH_HINTS
         const val OPTION_AI_ASSIST = KoinPluginConstants.OPTION_AI_ASSIST
         const val OPTION_MODULE_ID = KoinPluginConstants.OPTION_MODULE_ID
     }
@@ -67,6 +69,12 @@ class KoinCommandLineProcessor : CommandLineProcessor {
             required = false
         ),
         CliOption(
+            optionName = OPTION_PUBLISH_HINTS,
+            valueDescription = "<true|false>",
+            description = "Publish synthetic hint metadata for downstream compile-safety consumers",
+            required = false
+        ),
+        CliOption(
             optionName = OPTION_AI_ASSIST,
             valueDescription = "<true|false>",
             description = "Append an AI-assist hint pointing to Kotzilla MCP at the end of each Koin error message",
@@ -87,6 +95,7 @@ class KoinCommandLineProcessor : CommandLineProcessor {
             OPTION_UNSAFE_DSL_CHECKS -> configuration.put(KoinConfigurationKeys.UNSAFE_DSL_CHECKS, value.toBoolean())
             OPTION_SKIP_DEFAULT_VALUES -> configuration.put(KoinConfigurationKeys.SKIP_DEFAULT_VALUES, value.toBoolean())
             OPTION_COMPILE_SAFETY -> configuration.put(KoinConfigurationKeys.COMPILE_SAFETY, value.toBoolean())
+            OPTION_PUBLISH_HINTS -> configuration.put(KoinConfigurationKeys.PUBLISH_HINTS, value.toBoolean())
             OPTION_AI_ASSIST -> configuration.put(KoinConfigurationKeys.AI_ASSIST, value.toBoolean())
             OPTION_MODULE_ID -> configuration.put(KoinConfigurationKeys.MODULE_ID, value)
             else -> error("Unexpected config option: '${option.optionName}'")
