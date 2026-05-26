@@ -1,0 +1,198 @@
+# Koin Compiler Plugin — Kotlin Compiler Plugin for Koin DI
+
+> Native Kotlin Compiler Plugin (K2) for the Koin dependency injection framework. Transforms DSL calls (`single<T>()`, `factory<T>()`, ...) and processes annotations (`@Singleton`, `@Factory`, `@Module`, `@ComponentScan`, ...) at compile time. Adds compile-time graph validation — if it compiles, it works.
+
+## Key Facts
+
+- **Version**: 1.0.0
+- **Language**: Kotlin (K2 compiler required, 2.3.x+)
+- **Koin compatibility**: 4.2.0-RC2+
+- **License**: Apache 2.0
+- **Repository**: https://github.com/InsertKoinIO/koin-compiler-plugin
+- **Parent project (Koin)**: https://github.com/InsertKoinIO/koin
+
+## Installation
+
+```kotlin
+// settings.gradle.kts — Gradle Plugin Portal is enabled by default
+// Or add: pluginManagement { repositories { gradlePluginPortal() } }
+
+// build.gradle.kts (per-module, in any module that defines or starts Koin)
+plugins {
+    id("io.insert-koin.koin-compiler") version "1.0.0"
+}
+
+dependencies {
+    implementation(platform("io.insert-koin:koin-bom:4.2.0"))
+    implementation("io.insert-koin:koin-core")
+    // The plugin works with the standard Koin DSL — no extra runtime dep needed.
+    // For annotations, also add:
+    implementation("io.insert-koin:koin-core-annotations")
+}
+```
+
+## Plugin Configuration
+
+```kotlin
+koinCompiler {
+    userLogs = true            // Log discovered components (default: false)
+    debugLogs = false          // Verbose internal processing logs
+    unsafeDslChecks = true     // Validate create(::T) is the only call in scope { ... } lambdas
+    skipDefaultValues = true   // Skip injection for params with Kotlin default values (non-null, unannotated)
+    compileSafety = true       // Compile-time dependency graph validation (A2/A3/A4)
+    strictSafety = null        // null = auto-detect; force true/false to override
+}
+```
+
+### Compile Safety Levels
+
+When `compileSafety = true`, the plugin validates the dependency graph at three levels:
+
+- **A2 — Per-Module**: each module's definitions must resolve against its visible scope
+- **A3 — Full Graph**: at the aggregator (`startKoin<T>()` / `@KoinApplication`), validates every reachable definition
+- **A4 — Call-Site**: every `get<T>()`, `inject<T>()`, `koinViewModel<T>()`, etc. must resolve to a known definition
+
+Works with both the DSL and annotation styles. Replaces runtime `verify()` / `checkModules()`.
+
+### Strict Safety (Incremental Compilation Bypass)
+
+Auto-enabled on modules containing `startKoin`, `koinApplication`, or `@KoinApplication`. Forces the aggregator's `compileKotlin` to re-run every build so full-graph (A3) validation isn't skipped by Kotlin's incremental compiler when DSL lambda bodies or `@ComponentScan` packages change. Override with `strictSafety = true|false`. No effect when `compileSafety = false`.
+
+## Supported DSL Functions
+
+These calls are transformed at compile time. Without the plugin, they don't exist — the plugin generates the wiring.
+
+| Function | Receiver | Generates |
+|---|---|---|
+| `single<T>()` | `Module` | Singleton from primary constructor |
+| `factory<T>()` | `Module` | Factory from primary constructor |
+| `viewModel<T>()` | `Module` | ViewModel from primary constructor |
+| `worker<T>()` | `Module` | WorkManager Worker from primary constructor |
+| `scoped<T>()` | `ScopeDSL` | Scoped from primary constructor |
+| `create(::T)` | `Scope` | Constructor reference inside `scope { ... }` |
+| `module<T>()` | `KoinApplication` | Loads a single `@Module` class |
+| `modules(vararg KClass)` | `KoinApplication` | Loads multiple `@Module` classes |
+| `startKoin<T>()` | top-level | Application entry point — triggers full-graph (A3) validation |
+| `koinApplication<T>()` | top-level | Same as `startKoin<T>()` but returns the `KoinApplication` |
+| `koinConfiguration<T>()` | top-level | KMP-friendly Koin configuration |
+
+### Example
+
+```kotlin
+import org.koin.dsl.module
+import org.koin.dsl.bind
+
+val appModule = module {
+    single<Database>()                                // singleton, auto-wired
+    single<UserRepositoryImpl>() bind UserRepository::class
+    factory<GetUserUseCase>()                          // factory, auto-wired
+    viewModel<HomeViewModel>()
+    worker<SyncWorker>()
+
+    scope<UserSession> {
+        scoped<UserPreferences>()
+    }
+}
+
+class MyApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        startKoin<MyApp> {                              // <MyApp> triggers full-graph validation
+            androidContext(this@MyApp)
+            modules(appModule)
+        }
+    }
+}
+```
+
+## Annotations
+
+### Definition Annotations
+
+Apply to classes, to functions inside `@Module` classes, or to top-level functions (discovered by `@ComponentScan`).
+
+| Annotation | Generates |
+|---|---|
+| `@Single` / `@Singleton` | `single { }` |
+| `@Factory` | `factory { }` |
+| `@Scoped` | `scoped { }` |
+| `@KoinViewModel` | `viewModel { }` |
+| `@KoinWorker` | `worker { }` |
+
+### Module Annotations
+
+| Annotation | Effect |
+|---|---|
+| `@Module` | Marks a class as a Koin module container |
+| `@ComponentScan("pkg")` | Scans package(s) for annotated classes and top-level functions |
+| `@Configuration` | Auto-discovered by `@KoinApplication` (supports labels: `@Configuration("test", "prod")`) |
+| `@KoinApplication(modules)` | Application entry point — assembles `@Configuration` modules and runs full-graph validation |
+
+### Parameter Annotations
+
+| Annotation | Effect |
+|---|---|
+| `@Named("x")` | String qualifier → `named("x")` |
+| `@Qualifier(name = "x")` | String qualifier → `named("x")` |
+| `@Qualifier(MyType::class)` | Type qualifier → `typeQualifier<MyType>()` |
+| `@InjectedParam` | Uses `ParametersHolder.get()` |
+| `@Property("key")` | Injects a property value (warns if no `@PropertyValue` default) |
+| `@PropertyValue("key")` | Provides a default value for `@Property` |
+| `@Provided` | Type is supplied externally — skipped during safety validation |
+| `@ScopeId(name = "x")` | Resolves from a named scope → `getScope("x").get<T>()` |
+| `@ScopeId(MyScope::class)` | Resolves from a typed scope |
+
+### Example
+
+```kotlin
+import org.koin.core.annotation.*
+
+@Module
+@ComponentScan("com.myapp")
+@Configuration
+class AppModule
+
+@Singleton
+class Database
+
+@Singleton
+class UserRepository(private val db: Database)
+
+@KoinViewModel
+class HomeViewModel(
+    private val repo: UserRepository,
+    @InjectedParam val userId: String,
+) : ViewModel()
+
+// Top-level provider functions are also discovered by @ComponentScan
+@Singleton
+fun provideJson(): Json = Json { ignoreUnknownKeys = true }
+
+@KoinApplication
+class MyApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        startKoin<MyApp> { androidContext(this@MyApp) }
+    }
+}
+```
+
+## Migration from KSP (Koin Annotations)
+
+The compiler plugin replaces the older KSP-based `koin-ksp-compiler`. Annotations stay the same; remove the KSP setup and add the Kotlin compiler plugin instead. See: https://github.com/InsertKoinIO/koin-compiler-plugin/blob/main/docs/MIGRATION_FROM_KSP.md
+
+## Documentation
+
+- **Migration from KSP**: `docs/MIGRATION_FROM_KSP.md`
+- **Debugging & common issues**: `docs/DEBUGGING.md`
+- **All transformation examples**: `docs/TRANSFORMATIONS.md`
+- **Compile-time safety design**: `docs/COMPILE_TIME_SAFETY.md`
+- **Roadmap**: `docs/ROADMAP.md`
+- **Case study (Now in Android)**: `docs/CASE_STUDY_NOW_IN_ANDROID.md`
+- **Official Koin docs**: https://insert-koin.io/docs/intro/index
+
+## Related
+
+- **Koin runtime**: https://github.com/InsertKoinIO/koin
+- **Koin llms.txt**: https://github.com/InsertKoinIO/koin/blob/main/projects/llms.txt
+- **IDE plugin** (IntelliJ / Android Studio): https://plugins.jetbrains.com/plugin/26131-koin-dependency-injection-official-
