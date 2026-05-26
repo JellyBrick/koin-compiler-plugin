@@ -48,6 +48,11 @@ class DslHintGenerator(private val context: IrPluginContext) {
     ) {
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
 
+        // Shared per-batch deprecated annotation. IrConstructorCall is an IrExpression
+        // with no `parent` field, so reusing across hint functions is safe and saves ~5
+        // IR-node allocations per hint (multiplied by # of DSL definitions in this module).
+        val sharedDeprecated = buildDeprecatedHiddenAnnotation(context)
+
         for (def in dslDefinitions) {
             val targetClass = def.returnTypeClass
             val targetFqName = targetClass.fqNameWhenAvailable ?: continue
@@ -212,8 +217,13 @@ class DslHintGenerator(private val context: IrPluginContext) {
             // Empty body (stub — hint functions are never called)
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
 
-            // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets
-            function.addDeprecatedHiddenAnnotation(context)
+            // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets.
+            // Reuse the shared annotation built outside the loop.
+            if (sharedDeprecated != null) {
+                function.annotations = function.annotations + sharedDeprecated
+            } else {
+                function.addDeprecatedHiddenAnnotation(context)
+            }
 
             // Create synthetic FirFile for metadata
             val firModuleData = extractFirModuleData(targetClass)

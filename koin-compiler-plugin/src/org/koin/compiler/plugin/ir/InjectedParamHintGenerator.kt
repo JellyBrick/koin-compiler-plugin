@@ -55,6 +55,12 @@ class InjectedParamHintGenerator(
     private val parameterAnalyzer = ParameterAnalyzer(qualifierExtractor)
     private val localSlots = mutableMapOf<String, List<InjectedParamSlot>>()
     private val crossModuleCache = mutableMapOf<String, List<InjectedParamSlot>?>()
+
+    // Shared deprecated annotation for every hint emitted in this generator's lifetime.
+    // IrConstructorCall has no `parent` field so reuse is safe across functions, and the
+    // resolveTemplate path inside `buildDeprecatedHiddenAnnotation` only runs once per IrPluginContext.
+    // Lazy: only built when at least one hint is emitted.
+    private val sharedDeprecated by lazy { buildDeprecatedHiddenAnnotation(context) }
     // Targets with multiple definitions whose `@InjectedParam` shapes differ (or one defines
     // them and another doesn't). The plugin can't pick which definition a call site resolves
     // to without qualifier-aware resolution, so it skips D005/D006 for ambiguous targets.
@@ -265,7 +271,12 @@ class InjectedParamHintGenerator(
 
         function.valueParameters = params
         function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
-        function.addDeprecatedHiddenAnnotation(context)
+        val deprecated = sharedDeprecated
+        if (deprecated != null) {
+            function.annotations = function.annotations + deprecated
+        } else {
+            function.addDeprecatedHiddenAnnotation(context)
+        }
 
         // Synthetic IrFile (one per target — keeps file names deterministic and unique)
         val firModuleData = run {

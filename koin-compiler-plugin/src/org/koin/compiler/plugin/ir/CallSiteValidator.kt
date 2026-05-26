@@ -222,6 +222,10 @@ class CallSiteValidator(private val context: IrPluginContext) {
         val modulePrefix = HintFilePrefix.of(firModuleData.name.asString())
             .ifEmpty { "module__" }
 
+        // Shared deprecated annotation reused across every hint emitted below. Saves ~5 IR
+        // nodes per call site (multiplied by # of unresolved call sites in this module).
+        val sharedDeprecated = buildDeprecatedHiddenAnnotation(context)
+
         for (callSite in uniqueCallSites) {
             val targetClass = callSite.targetClass
 
@@ -267,8 +271,13 @@ class CallSiteValidator(private val context: IrPluginContext) {
             // Empty body (stub — hint functions are never called)
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
 
-            // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets
-            function.addDeprecatedHiddenAnnotation(context)
+            // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets.
+            // Reuse the per-batch shared annotation.
+            if (sharedDeprecated != null) {
+                function.annotations = function.annotations + sharedDeprecated
+            } else {
+                function.addDeprecatedHiddenAnnotation(context)
+            }
 
             // Build deterministic file name, prefixed by module identifier to keep
             // hint class names unique across Gradle modules (see above — issue #20).

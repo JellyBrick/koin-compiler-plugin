@@ -41,10 +41,12 @@ fun IrSimpleFunction.addDeprecatedHiddenAnnotation(context: IrPluginContext) {
  * Symbol-table lookups (`referenceClass`) and `declarations.filterIsInstance<...>().firstOrNull`
  * walks are not free — `kotlin.Deprecated` has many constructors and `DeprecationLevel` enumerates
  * 4 entries. For a module with 70 `@Factory` we emit 70+ hint functions, so the un-cached form
- * paid that resolution 70+ times per module. The IR validator rejects sharing the same
- * `IrConstructorCall` instance ("Duplicate IR node"), so we cache only the lookup results and
- * still allocate a fresh `IrConstructorCall` per annotation site — the per-call work shrinks from
- * (referenceClass × 2 + declarations walk × 2 + IR alloc) to (IR alloc).
+ * paid that resolution 70+ times per module. We cache the symbol lookups in this template; the
+ * actual `IrConstructorCall` is still cheap to allocate per call site, but callers that emit
+ * many hint functions in one batch should call [buildDeprecatedHiddenAnnotation] once and
+ * reuse the result via `function.annotations + sharedAnnotation`. `IrConstructorCall` is an
+ * `IrExpression` with no `parent` field, so reusing one instance across multiple functions'
+ * annotation lists is safe (only `IrDeclaration` subclasses care about parent uniqueness).
  *
  * Keyed by `IrPluginContext` identity so each IR pass / plugin instantiation gets its own cache.
  * Concurrent compile invocations from different daemons run with separate contexts so there's no
@@ -110,9 +112,10 @@ private fun resolveTemplate(context: IrPluginContext): DeprecatedHiddenAnnotatio
  * Returns null if the Deprecated class cannot be resolved.
  *
  * Symbol-table lookups go through a per-`IrPluginContext` cache (see [resolveTemplate]), so the
- * first call per compile pays the resolution cost and every subsequent call reuses it. The
- * resulting `IrConstructorCall` is still a fresh allocation per annotation site — the IR
- * validator rejects sharing the same node across functions.
+ * first call per compile pays the resolution cost and every subsequent call reuses it. Callers
+ * that emit many hint functions in one batch should call this once and append the same
+ * `IrConstructorCall` to every function's annotation list — `IrConstructorCall` is an
+ * `IrExpression` (no `parent` field) so sharing across annotation lists is safe.
  */
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 internal fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstructorCall? {

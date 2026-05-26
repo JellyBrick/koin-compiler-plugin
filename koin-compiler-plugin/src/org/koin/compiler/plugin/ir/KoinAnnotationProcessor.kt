@@ -1142,6 +1142,8 @@ class KoinAnnotationProcessor(
         // `generateModuleScanHints` — see [KoinPluginConstants.MAX_HINTS_PER_FILE] for why.
         // The first part keeps the unsuffixed `koin_demand_hints.kt` name so single-file
         // demand-hint output stays byte-identical to the pre-split behavior.
+        // Shared deprecated annotation reused per demand hint.
+        val sharedDeprecated = buildDeprecatedHiddenAnnotation(context)
         var currentPartIndex = 0
         var currentHintFile: IrFile? = null
         var currentHintCount = 0
@@ -1214,7 +1216,11 @@ class KoinAnnotationProcessor(
             valueParam.parent = function
             function.valueParameters = listOf(valueParam)
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
-            function.addDeprecatedHiddenAnnotation(context)
+            if (sharedDeprecated != null) {
+                function.annotations = function.annotations + sharedDeprecated
+            } else {
+                function.addDeprecatedHiddenAnnotation(context)
+            }
 
             // Lazy first part, roll over once we cross MAX_HINTS_PER_FILE.
             if (currentHintFile == null) {
@@ -1358,6 +1364,12 @@ class KoinAnnotationProcessor(
             // LinkedHashSet: O(1) duplicate check + preserved insertion order for deterministic debug logs.
             val qualifiedEntriesByDefType = mutableMapOf<String, LinkedHashSet<String>>()
 
+            // Shared per-module deprecated annotation. IrConstructorCall is an IrExpression
+            // (no `parent` field), so reusing the same instance across hint functions in this
+            // module-scan batch is safe and skips ~5 IR-node allocations per hint. For 100
+            // definitions in one module, that drops ~500 IR nodes from FIR serialization.
+            val sharedDeprecated = buildDeprecatedHiddenAnnotation(context)
+
             for (definition in definitions) {
                 val defTypeStr = definitionTypeToString(definition.definitionType)
                 val targetClass = definition.returnTypeClass
@@ -1369,13 +1381,13 @@ class KoinAnnotationProcessor(
                         // Extract qualifier from the local class so cross-module consumers can recover it
                         val classQualifier = definition.qualifier ?: qualifierExtractor.extractFromClass(definition.irClass)
                         KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }} qualifier=${classQualifier?.debugString()}" }
-                        emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, classQualifier))
+                        emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, classQualifier, sharedDeprecatedAnnotation = sharedDeprecated))
                     }
                     is Definition.ExternalFunctionDef -> {
                         // External function definition hint: componentscan_<moduleId>_<defType>
                         val hintName = KoinModuleFirGenerator.moduleScanHintFunctionName(sanitizedModuleId, defTypeStr)
                         KoinPluginLogger.debug { "    + componentscan hint: ${targetClass.name} ($defTypeStr) bindings=${definition.bindings.map { it.name.asString() }}" }
-                        emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, definition.qualifier))
+                        emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, definition.qualifier, sharedDeprecatedAnnotation = sharedDeprecated))
                     }
                     is Definition.TopLevelFunctionDef -> {
                         // Top-level functions extract qualifier from the function declaration
@@ -1384,7 +1396,7 @@ class KoinAnnotationProcessor(
                             // Unqualified: legacy shared-name overload keyed on target type
                             val hintName = KoinModuleFirGenerator.moduleScanFunctionHintFunctionName(sanitizedModuleId, defTypeStr)
                             KoinPluginLogger.debug { "    + componentscanfunc hint (unqualified): ${targetClass.name} ($defTypeStr)" }
-                            emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, null))
+                            emit(createHintFunction(hintName, targetClass, definition.bindings, definition.scopeClass, null, sharedDeprecatedAnnotation = sharedDeprecated))
                         } else {
                             // Qualified: per-qualifier entry under unique name to avoid signature clashes
                             // when multiple functions share the same target type (e.g., Unit-returning initializers).
@@ -1396,7 +1408,7 @@ class KoinAnnotationProcessor(
                             } else {
                                 val entryName = KoinModuleFirGenerator.moduleScanFunctionEntryHintName(sanitizedModuleId, defTypeStr, discriminator)
                                 KoinPluginLogger.debug { "    + componentscanfunc entry: ${targetClass.name} ($defTypeStr) qualifier=${funcQualifier.debugString()} -> $entryName" }
-                                emit(createHintFunction(entryName, targetClass, definition.bindings, definition.scopeClass, funcQualifier))
+                                emit(createHintFunction(entryName, targetClass, definition.bindings, definition.scopeClass, funcQualifier, sharedDeprecatedAnnotation = sharedDeprecated))
                             }
                         }
                     }
@@ -1413,7 +1425,7 @@ class KoinAnnotationProcessor(
             for ((defTypeStr, discriminators) in qualifiedEntriesByDefType) {
                 val rosterName = KoinModuleFirGenerator.moduleScanFunctionRosterHintName(sanitizedModuleId, defTypeStr)
                 KoinPluginLogger.debug { "    + componentscanfunc roster: $defTypeStr lists ${discriminators.size} qualifier(s) -> $rosterName" }
-                emit(createRosterHintFunction(rosterName, discriminators.sorted()))
+                emit(createRosterHintFunction(rosterName, discriminators.sorted(), sharedDeprecated))
             }
 
             if (totalHintCount == 0) {
@@ -1640,7 +1652,11 @@ class KoinAnnotationProcessor(
      * discriminators for a given (moduleId, defType). All parameters are `Unit`-typed; the names
      * are the payload. Consumer reads the names to find which per-qualifier entries to look up.
      */
-    private fun createRosterHintFunction(hintName: Name, sanitizedQualifiers: List<String>): IrSimpleFunction {
+    private fun createRosterHintFunction(
+        hintName: Name,
+        sanitizedQualifiers: List<String>,
+        sharedDeprecatedAnnotation: IrConstructorCall? = null,
+    ): IrSimpleFunction {
         val function = context.irFactory.createSimpleFunction(
             startOffset = UNDEFINED_OFFSET,
             endOffset = UNDEFINED_OFFSET,
@@ -1680,7 +1696,11 @@ class KoinAnnotationProcessor(
 
         function.valueParameters = params
         function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
-        function.addDeprecatedHiddenAnnotation(context)
+        if (sharedDeprecatedAnnotation != null) {
+            function.annotations = function.annotations + sharedDeprecatedAnnotation
+        } else {
+            function.addDeprecatedHiddenAnnotation(context)
+        }
 
         return function
     }
