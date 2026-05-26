@@ -273,7 +273,7 @@ class InjectedParamHintGenerator(
         function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
         val deprecated = sharedDeprecated
         if (deprecated != null) {
-            function.annotations = function.annotations + deprecated
+            function.annotations = listOf(deprecated)
         } else {
             function.addDeprecatedHiddenAnnotation(context)
         }

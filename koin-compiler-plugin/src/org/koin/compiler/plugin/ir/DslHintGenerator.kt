@@ -220,7 +220,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
             // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets.
             // Reuse the shared annotation built outside the loop.
             if (sharedDeprecated != null) {
-                function.annotations = function.annotations + sharedDeprecated
+                function.annotations = listOf(sharedDeprecated)
             } else {
                 function.addDeprecatedHiddenAnnotation(context)
             }

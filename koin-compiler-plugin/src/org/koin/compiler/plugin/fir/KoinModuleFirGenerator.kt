@@ -1087,6 +1087,17 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
         return packages
     }
 
+    // Lookup index by definition type. generateFunctions() is invoked per CallableId, and each
+    // invocation previously did a linear `definitionClassInfos.filter { it.definitionType == defType }`
+    // (line 1721). With N definitions × M defTypes (~5 — single, factory, scoped, viewmodel, worker),
+    // that's O(N × M) scans per FIR session. Pre-grouping turns each filter into an O(1) map lookup.
+    private val definitionClassInfosByType: Map<String, List<DefinitionClassInfo>> by lazy {
+        definitionClassInfos.groupBy { it.definitionType }
+    }
+    private val definitionFunctionInfosByType: Map<String, List<DefinitionFunctionInfo>> by lazy {
+        definitionFunctionInfos.groupBy { it.definitionType }
+    }
+
     // Cache of definition classes (@Singleton, @Factory, @KoinViewModel, etc.) for cross-module discovery
     // Only includes "orphan" definitions - classes NOT covered by any local @Module's @ComponentScan
     // These generate hint functions in org.koin.plugin.hints package
@@ -1718,7 +1729,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
             val defType = definitionTypeFromHintFunctionName(callableId.callableName.asString())
             if (defType != null) {
                 // Find definition classes with this type
-                val matchingDefinitions = definitionClassInfos.filter { it.definitionType == defType }
+                val matchingDefinitions = definitionClassInfosByType[defType].orEmpty()
                 log { "generateFunctions: Generating definition hints for type '$defType', ${matchingDefinitions.size} classes" }
 
                 return matchingDefinitions.mapNotNull { defInfo ->
@@ -1766,7 +1777,7 @@ class KoinModuleFirGenerator(session: FirSession) : FirDeclarationGenerationExte
             // plus additional parameters encoding bindings, scope, and qualifier metadata.
             val funcDefType = definitionTypeFromFunctionHintName(callableId.callableName.asString())
             if (funcDefType != null) {
-                val matchingFunctions = definitionFunctionInfos.filter { it.definitionType == funcDefType }
+                val matchingFunctions = definitionFunctionInfosByType[funcDefType].orEmpty()
                 log { "generateFunctions: Generating function definition hints for type '$funcDefType', ${matchingFunctions.size} functions" }
 
                 return matchingFunctions.mapNotNull { funcInfo ->

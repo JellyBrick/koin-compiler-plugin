@@ -125,6 +125,163 @@ class KoinAnnotationProcessor(
     }
 
     /**
+     * Single-pass annotation walk result for one declaration (class or function). The 7 original
+     * `getXxx` helpers (`getDefinitionType`, `getScopeClass`, `getScopeName`, `getScopeArchetype`,
+     * `getCreatedAtStart`, `getExplicitBindings`, plus the `@Inject`-constructor fallback) each
+     * iterated `declaration.annotations` independently, paying `O(annotations × calls-per-decl)`.
+     * For a 70-class module that's ~70 × 6 = 420 annotation walks per Phase 1. When the same
+     * IrClass shows up under multiple `@ComponentScan` modules, the multiplier compounds further
+     * (3 modules × 70 classes × 6 = 1260 walks).
+     *
+     * This struct collapses all of that into a single pass over `declaration.annotations`, then
+     * memoizes by IrDeclaration identity. WeakHashMap lets unused decls fall out under GC.
+     */
+    private data class ClassAnnotationMetadata(
+        val definitionType: DefinitionType?,
+        val scopeClass: IrClass?,
+        val scopeName: String?,
+        val scopeArchetype: ScopeArchetype?,
+        val createdAtStart: Boolean,
+        val explicitBindings: List<IrClass>?,
+    )
+
+    private val classMetadataCache = java.util.WeakHashMap<IrDeclaration, ClassAnnotationMetadata>()
+
+    @OptIn(DeprecatedForRemovalCompilerApi::class)
+    @Suppress("LongMethod", "CyclomaticComplexMethod")
+    private fun extractClassMetadata(declaration: IrDeclaration): ClassAnnotationMetadata {
+        classMetadataCache[declaration]?.let { return it }
+
+        // Resolve FqName strings once outside the loop. JIT can't lift these out automatically
+        // because each `KoinAnnotationFqNames.*.asString()` goes through a property getter chain.
+        val singletonFq = KoinAnnotationFqNames.SINGLETON.asString()
+        val singleFq = KoinAnnotationFqNames.SINGLE.asString()
+        val factoryFq = KoinAnnotationFqNames.FACTORY.asString()
+        val scopedFq = KoinAnnotationFqNames.SCOPED.asString()
+        val viewModelFq = KoinAnnotationFqNames.KOIN_VIEW_MODEL.asString()
+        val workerFq = KoinAnnotationFqNames.KOIN_WORKER.asString()
+        val scopeFq = KoinAnnotationFqNames.SCOPE.asString()
+        val viewModelScopeFq = KoinAnnotationFqNames.VIEW_MODEL_SCOPE.asString()
+        val activityScopeFq = KoinAnnotationFqNames.ACTIVITY_SCOPE.asString()
+        val activityRetainedScopeFq = KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE.asString()
+        val fragmentScopeFq = KoinAnnotationFqNames.FRAGMENT_SCOPE.asString()
+        val jakartaSingletonFq = KoinAnnotationFqNames.JAKARTA_SINGLETON.asString()
+        val jakartaInjectFq = KoinAnnotationFqNames.JAKARTA_INJECT.asString()
+        val javaxSingletonFq = KoinAnnotationFqNames.JAVAX_SINGLETON.asString()
+        val javaxInjectFq = KoinAnnotationFqNames.JAVAX_INJECT.asString()
+
+        val createdAtStartName = Name.identifier("createdAtStart")
+
+        var defType: DefinitionType? = null
+        var scopeClass: IrClass? = null
+        var scopeName: String? = null
+        var scopeArchetype: ScopeArchetype? = null
+        var createdAtStart = false
+        var explicitBindings: List<IrClass>? = null
+
+        for (ann in declaration.annotations) {
+            val fq = ann.type.classFqName?.asString() ?: continue
+            when (fq) {
+                singletonFq, singleFq -> {
+                    if (defType == null) defType = DefinitionType.SINGLE
+                    if (!createdAtStart) {
+                        createdAtStart = extractBooleanArg(ann, createdAtStartName, positionalFallbackIndex = 1)
+                    }
+                    if (explicitBindings == null) explicitBindings = parseBindsFromAnnotation(ann)
+                }
+                factoryFq -> {
+                    if (defType == null) defType = DefinitionType.FACTORY
+                    if (explicitBindings == null) explicitBindings = parseBindsFromAnnotation(ann)
+                }
+                scopedFq -> {
+                    if (defType == null) defType = DefinitionType.SCOPED
+                    if (explicitBindings == null) explicitBindings = parseBindsFromAnnotation(ann)
+                }
+                viewModelFq -> {
+                    if (defType == null) defType = DefinitionType.VIEW_MODEL
+                    if (explicitBindings == null) explicitBindings = parseBindsFromAnnotation(ann)
+                }
+                workerFq -> {
+                    if (defType == null) defType = DefinitionType.WORKER
+                    if (explicitBindings == null) explicitBindings = parseBindsFromAnnotation(ann)
+                }
+                scopeFq -> {
+                    if (scopeClass == null) {
+                        val va = ann.getValueArgument(0)
+                        if (va is IrClassReferenceImpl) {
+                            scopeClass = va.classType.classifierOrNull?.owner as? IrClass
+                        }
+                    }
+                    if (scopeName == null) {
+                        // @Scope(value: KClass = Unit::class, name: String = "") — name is positional index 1
+                        val na = ann.getValueArgument(1) as? IrConst
+                        val v = na?.value as? String
+                        if (!v.isNullOrEmpty()) scopeName = v
+                    }
+                }
+                viewModelScopeFq -> {
+                    if (scopeArchetype == null) scopeArchetype = ScopeArchetype.VIEW_MODEL_SCOPE
+                    if (defType == null) defType = DefinitionType.SCOPED
+                }
+                activityScopeFq -> {
+                    if (scopeArchetype == null) scopeArchetype = ScopeArchetype.ACTIVITY_SCOPE
+                    if (defType == null) defType = DefinitionType.SCOPED
+                }
+                activityRetainedScopeFq -> {
+                    if (scopeArchetype == null) scopeArchetype = ScopeArchetype.ACTIVITY_RETAINED_SCOPE
+                    if (defType == null) defType = DefinitionType.SCOPED
+                }
+                fragmentScopeFq -> {
+                    if (scopeArchetype == null) scopeArchetype = ScopeArchetype.FRAGMENT_SCOPE
+                    if (defType == null) defType = DefinitionType.SCOPED
+                }
+                jakartaSingletonFq, javaxSingletonFq -> {
+                    if (defType == null) defType = DefinitionType.SINGLE
+                }
+                jakartaInjectFq, javaxInjectFq -> {
+                    if (defType == null) defType = DefinitionType.FACTORY
+                }
+            }
+        }
+
+        // JSR-330 fallback: @Inject on a constructor (not the class) implies FACTORY when no
+        // other annotation already determined the type.
+        if (defType == null && declaration is IrClass && hasInjectConstructor(declaration)) {
+            defType = DefinitionType.FACTORY
+        }
+
+        val md = ClassAnnotationMetadata(
+            definitionType = defType,
+            scopeClass = scopeClass,
+            scopeName = scopeName,
+            scopeArchetype = scopeArchetype,
+            createdAtStart = createdAtStart,
+            explicitBindings = explicitBindings,
+        )
+        classMetadataCache[declaration] = md
+        return md
+    }
+
+    /**
+     * Parse the `binds = [...]` parameter of a definition annotation. Filters out `kotlin.Unit`
+     * which is the default sentinel. Returns null when the annotation has no `binds` argument
+     * (so callers can fall back to auto-bind), empty list when `binds = []` was explicit.
+     */
+    private fun parseBindsFromAnnotation(annotation: IrConstructorCall): List<IrClass>? {
+        val bindsArg = annotation.getValueArgument(Name.identifier("binds"))
+            ?: annotation.getValueArgument(0)
+        if (bindsArg is IrVararg) {
+            return bindsArg.elements.mapNotNull { e ->
+                when (e) {
+                    is IrClassReference -> e.classType.classifierOrNull?.owner as? IrClass
+                    else -> null
+                }
+            }.filter { it.fqNameWhenAvailable?.asString() != "kotlin.Unit" }
+        }
+        return null
+    }
+
+    /**
      * Pre-extracted summary of one cross-module `definition_<defType>` hint function.
      *
      * Everything we need from a hint to construct a [DefinitionClass] — except the per-caller
@@ -630,17 +787,8 @@ class KoinAnnotationProcessor(
      * Returns null for the string-named variant `@Scope(name = "session")` — use [getScopeName] for that.
      * Works on both classes and functions.
      */
-    private fun getScopeClass(declaration: IrDeclaration): IrClass? {
-        val scopeAnnotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.SCOPE.asString()
-        } ?: return null
-
-        val valueArg = scopeAnnotation.getValueArgument(0)
-        return when (valueArg) {
-            is IrClassReferenceImpl -> valueArg.classType.classifierOrNull?.owner as? IrClass
-            else -> null
-        }
-    }
+    private fun getScopeClass(declaration: IrDeclaration): IrClass? =
+        extractClassMetadata(declaration).scopeClass
 
     /**
      * Get the scope qualifier name from `@Scope(name = "session")` (string-named scope).
@@ -651,45 +799,11 @@ class KoinAnnotationProcessor(
      * definition through `buildScoped` on a `Module` receiver, where no such overload exists, producing
      * no bean definition at all.
      */
-    private fun getScopeName(declaration: IrDeclaration): String? {
-        val scopeAnnotation = declaration.annotations.firstOrNull { annotation ->
-            annotation.type.classFqName?.asString() == KoinAnnotationFqNames.SCOPE.asString()
-        } ?: return null
+    private fun getScopeName(declaration: IrDeclaration): String? =
+        extractClassMetadata(declaration).scopeName
 
-        // @Scope is declared as `(value: KClass = Unit::class, name: String = "")` — name is positional
-        // arg index 1 when supplied. IrCall stores explicit named-args at their declared parameter
-        // index, so getValueArgument(1) returns the user's `name = "..."` whether they wrote it
-        // positionally or as a named argument.
-        val nameArg = scopeAnnotation.getValueArgument(1) as? org.jetbrains.kotlin.ir.expressions.IrConst
-        val value = nameArg?.value as? String
-        return value?.takeIf { it.isNotEmpty() }
-    }
-
-    private fun getDefinitionType(declaration: IrDeclaration): DefinitionType? {
-        return when {
-            // Koin annotations
-            declaration.hasAnnotation(KoinAnnotationFqNames.SINGLETON) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(KoinAnnotationFqNames.SINGLE) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(KoinAnnotationFqNames.FACTORY) -> DefinitionType.FACTORY
-            declaration.hasAnnotation(KoinAnnotationFqNames.SCOPED) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(KoinAnnotationFqNames.KOIN_VIEW_MODEL) -> DefinitionType.VIEW_MODEL
-            declaration.hasAnnotation(KoinAnnotationFqNames.KOIN_WORKER) -> DefinitionType.WORKER
-            // Scope archetype annotations imply SCOPED definition
-            declaration.hasAnnotation(KoinAnnotationFqNames.VIEW_MODEL_SCOPE) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_SCOPE) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE) -> DefinitionType.SCOPED
-            declaration.hasAnnotation(KoinAnnotationFqNames.FRAGMENT_SCOPE) -> DefinitionType.SCOPED
-            // JSR-330 annotations (jakarta.inject)
-            declaration.hasAnnotation(KoinAnnotationFqNames.JAKARTA_SINGLETON) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(KoinAnnotationFqNames.JAKARTA_INJECT) -> DefinitionType.FACTORY // @Inject on class generates factory
-            // JSR-330 annotations (javax.inject) - legacy package
-            declaration.hasAnnotation(KoinAnnotationFqNames.JAVAX_SINGLETON) -> DefinitionType.SINGLE
-            declaration.hasAnnotation(KoinAnnotationFqNames.JAVAX_INJECT) -> DefinitionType.FACTORY // @Inject on class generates factory
-            // JSR-330: @Inject on constructor also generates factory
-            declaration is IrClass && hasInjectConstructor(declaration) -> DefinitionType.FACTORY
-            else -> null
-        }
-    }
+    private fun getDefinitionType(declaration: IrDeclaration): DefinitionType? =
+        extractClassMetadata(declaration).definitionType
 
     /**
      * Check if the class has a constructor annotated with @Inject (jakarta.inject or javax.inject)
@@ -709,29 +823,14 @@ class KoinAnnotationProcessor(
      * Get scope archetype from annotations like @ViewModelScope, @ActivityScope, etc.
      * Works on both classes and functions.
      */
-    private fun getScopeArchetype(declaration: IrDeclaration): ScopeArchetype? {
-        return when {
-            declaration.hasAnnotation(KoinAnnotationFqNames.VIEW_MODEL_SCOPE) -> ScopeArchetype.VIEW_MODEL_SCOPE
-            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_SCOPE) -> ScopeArchetype.ACTIVITY_SCOPE
-            declaration.hasAnnotation(KoinAnnotationFqNames.ACTIVITY_RETAINED_SCOPE) -> ScopeArchetype.ACTIVITY_RETAINED_SCOPE
-            declaration.hasAnnotation(KoinAnnotationFqNames.FRAGMENT_SCOPE) -> ScopeArchetype.FRAGMENT_SCOPE
-            else -> null
-        }
-    }
+    private fun getScopeArchetype(declaration: IrDeclaration): ScopeArchetype? =
+        extractClassMetadata(declaration).scopeArchetype
 
     /**
      * Get createdAtStart parameter from @Single or @Singleton annotation
      */
-    private fun getCreatedAtStart(declaration: IrDeclaration): Boolean {
-        val annotation = declaration.annotations.firstOrNull { annotation ->
-            val fqName = annotation.type.classFqName?.asString()
-            fqName == KoinAnnotationFqNames.SINGLETON.asString() || fqName == KoinAnnotationFqNames.SINGLE.asString()
-        } ?: return false
-
-        // createdAtStart: look up by name first, then fall back to positional index 1.
-        // Signature: `@Single(binds: Array<KClass<*>> = [], createdAtStart: Boolean = false)`.
-        return extractBooleanArg(annotation, Name.identifier("createdAtStart"), positionalFallbackIndex = 1)
-    }
+    private fun getCreatedAtStart(declaration: IrDeclaration): Boolean =
+        extractClassMetadata(declaration).createdAtStart
 
     /**
      * Get `createdAtStart` from `@Module(createdAtStart = true)`. Drives whether the generated
@@ -765,34 +864,8 @@ class KoinAnnotationProcessor(
      * - empty list means `binds = []` was explicitly set -> no bindings (auto-binding suppressed)
      * - non-empty list means explicit bindings were provided
      */
-    private fun getExplicitBindings(declaration: IrDeclaration): List<IrClass>? {
-        val definitionAnnotations = listOf(KoinAnnotationFqNames.SINGLETON, KoinAnnotationFqNames.SINGLE, KoinAnnotationFqNames.FACTORY, KoinAnnotationFqNames.SCOPED, KoinAnnotationFqNames.KOIN_VIEW_MODEL, KoinAnnotationFqNames.KOIN_WORKER)
-
-        val annotation = declaration.annotations.firstOrNull { annotation ->
-            definitionAnnotations.any { it.asString() == annotation.type.classFqName?.asString() }
-        } ?: return null
-
-        // binds: look up by name first, then fall back to positional index 0
-        val bindsArg = annotation.getValueArgument(Name.identifier("binds"))
-            ?: annotation.getValueArgument(0)
-
-        if (bindsArg is IrVararg) {
-            val bindings = bindsArg.elements.mapNotNull { element ->
-                when (element) {
-                    is IrClassReference -> element.classType.classifierOrNull?.owner as? IrClass
-                    else -> null
-                }
-            }.filter {
-                // Filter out Unit::class which is the default value
-                it.fqNameWhenAvailable?.asString() != "kotlin.Unit"
-            }
-            // If binds parameter was present but resolved to empty (binds = [] or binds = [Unit::class]),
-            // return empty list to signal "explicitly no bindings"
-            return bindings
-        }
-
-        return null // No binds parameter specified
-    }
+    private fun getExplicitBindings(declaration: IrDeclaration): List<IrClass>? =
+        extractClassMetadata(declaration).explicitBindings
 
     /**
      * Custom hasAnnotation that resolves via [IrType.classFqName] (string comparison).
@@ -1085,6 +1158,13 @@ class KoinAnnotationProcessor(
         // They're no longer needed — validation phases use assembledGraphTypes (Set<String>)
         // and getAllKnownDefinitions() which rebuilds from collectedModuleClasses if needed.
         cachedModuleDefinitions = null
+
+        // Drop per-IrDeclaration annotation metadata cache too. The metadata was useful during
+        // Phase 1 + hint generation, but later phases (call-site validation, startKoin transform)
+        // re-extract via assembledGraphTypes / getAllKnownDefinitions(). Clearing here releases
+        // the WeakHashMap entries' strong refs to ClassAnnotationMetadata values, letting the
+        // IrClass keys also become unreachable if no other reference survives.
+        classMetadataCache.clear()
     }
 
     /**
@@ -1217,7 +1297,10 @@ class KoinAnnotationProcessor(
             function.valueParameters = listOf(valueParam)
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
             if (sharedDeprecated != null) {
-                function.annotations = function.annotations + sharedDeprecated
+                // Fresh function: annotations list is empty so listOf(...) skips a List concat
+                // (function.annotations + x always builds a new ArrayList; for ~70 hints/module
+                // that's ~70 wasted ArrayList allocations).
+                function.annotations = listOf(sharedDeprecated)
             } else {
                 function.addDeprecatedHiddenAnnotation(context)
             }
@@ -1598,7 +1681,8 @@ class KoinAnnotationProcessor(
         // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets
         // Reuse shared annotation when available to avoid creating identical annotation IR per function
         if (sharedDeprecatedAnnotation != null) {
-            function.annotations = function.annotations + sharedDeprecatedAnnotation
+            // Fresh function: empty annotations list, so listOf(...) avoids the `+` ArrayList alloc.
+            function.annotations = listOf(sharedDeprecatedAnnotation)
         } else {
             function.addDeprecatedHiddenAnnotation(context)
         }
@@ -1697,7 +1781,8 @@ class KoinAnnotationProcessor(
         function.valueParameters = params
         function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
         if (sharedDeprecatedAnnotation != null) {
-            function.annotations = function.annotations + sharedDeprecatedAnnotation
+            // Fresh function: empty annotations list, so listOf(...) avoids the `+` ArrayList alloc.
+            function.annotations = listOf(sharedDeprecatedAnnotation)
         } else {
             function.addDeprecatedHiddenAnnotation(context)
         }
