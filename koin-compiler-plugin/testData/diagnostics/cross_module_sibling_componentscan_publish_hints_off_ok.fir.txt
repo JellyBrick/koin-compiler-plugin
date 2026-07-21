@@ -1,0 +1,62 @@
+FILE: ports.kt
+    package app.port
+
+    public abstract interface GreeterPort : R|kotlin/Any| {
+        public abstract fun greet(): R|kotlin/String|
+
+    }
+FILE: impl.kt
+    package impl.greet
+
+    @R|org/koin/core/annotation/Single|() public final class DefaultGreeter : R|app/port/GreeterPort| {
+        public constructor(): R|impl/greet/DefaultGreeter| {
+            super<R|kotlin/Any|>()
+        }
+
+        public open override fun greet(): R|kotlin/String| {
+            ^greet String(hello)
+        }
+
+    }
+FILE: main.kt
+    public final class Service : R|kotlin/Any| {
+        public constructor(greeter: R|app/port/GreeterPort|): R|Service| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val greeter: R|app/port/GreeterPort| = R|<local>/greeter|
+            public get(): R|app/port/GreeterPort|
+
+    }
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/ComponentScan|(value = vararg(String(impl.greet))) public final class ImplScanModule : R|kotlin/Any| {
+        public constructor(): R|ImplScanModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Module|() public final class FeatureModule : R|kotlin/Any| {
+        public constructor(): R|FeatureModule| {
+            super<R|kotlin/Any|>()
+        }
+
+        @R|org/koin/core/annotation/Factory|() public final fun service(greeter: R|app/port/GreeterPort|): R|Service| {
+            ^service R|/Service.Service|(R|<local>/greeter|)
+        }
+
+    }
+    @R|org/koin/core/annotation/KoinApplication|(modules = <collectionLiteralCall>(<getClass>(Q|ImplScanModule|), <getClass>(Q|FeatureModule|))) public final object MyApp : R|kotlin/Any| {
+        private constructor(): R|MyApp| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final fun main(): R|kotlin/Unit| {
+        R|org/koin/plugin/module/dsl/startKoin|<R|MyApp|>(<L> = startKoin@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            ^@startKoin Unit
+        }
+        )
+    }
+FILE: /implScanModuleModule.kt
+    public final fun R|ImplScanModule|.module(): R|org/koin/core/module/Module|
+FILE: /featureModuleModule.kt
+    public final fun R|FeatureModule|.module(): R|org/koin/core/module/Module|

@@ -1,0 +1,58 @@
+FILE: test.kt
+    public final class Connection : R|kotlin/Any| {
+        public constructor(): R|Connection| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final class SessionHolder : R|kotlin/Any| {
+        public constructor(connection: R|Connection|): R|SessionHolder| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val connection: R|Connection| = R|<local>/connection|
+            public get(): R|Connection|
+
+    }
+    public final class Clock : R|kotlin/Any| {
+        public constructor(): R|Clock| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final val sessionModule: R|org/koin/core/module/Module| = R|org/koin/dsl/module|(<L> = module@fun R|org/koin/core/module/Module|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+        this@R|special/anonymous|.R|org/koin/core/module/Module.factory|<R|SessionHolder|>(<L> = factory@fun R|org/koin/core/scope/Scope|.<anonymous>(params: R|org/koin/core/parameter/ParametersHolder|): R|SessionHolder| <inline=NoInline>  {
+            ^ R|/SessionHolder.SessionHolder|(R|<local>/params|.R|org/koin/core/parameter/ParametersHolder.get|<R|Connection|>())
+        }
+        )
+    }
+    )
+        public get(): R|org/koin/core/module/Module|
+    @R|org/koin/core/annotation/Module|() public final class CoreModule : R|kotlin/Any| {
+        public constructor(): R|CoreModule| {
+            super<R|kotlin/Any|>()
+        }
+
+        @R|org/koin/core/annotation/Single|() public final fun clock(): R|Clock| {
+            ^clock R|/Clock.Clock|()
+        }
+
+    }
+    @R|org/koin/core/annotation/KoinApplication|(modules = <collectionLiteralCall>(<getClass>(Q|CoreModule|))) public final object MyApp : R|kotlin/Any| {
+        private constructor(): R|MyApp| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final fun main(): R|kotlin/Unit| {
+        R|org/koin/plugin/module/dsl/startKoin|<R|MyApp|>(<L> = startKoin@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            ^@startKoin Unit
+        }
+        )
+    }
+FILE: /coreModuleModule.kt
+    public final fun R|CoreModule|.module(): R|org/koin/core/module/Module|
+FILE: org/koin/plugin/hints/coreModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_coreModule__clock(contributed: R|Clock|): R|kotlin/Unit|

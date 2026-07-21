@@ -61,6 +61,9 @@ fun TestConfigurationBuilder.configurePlugin() {
 }
 
 private class ExtensionRegistrarConfigurator(testServices: TestServices) : EnvironmentConfigurator(testServices) {
+    override val directiveContainers: List<org.jetbrains.kotlin.test.directives.model.DirectivesContainer>
+        get() = listOf(KoinTestDirectives)
+
     override fun CompilerPluginRegistrar.ExtensionStorage.registerCompilerExtensions(
         module: TestModule,
         configuration: CompilerConfiguration
@@ -70,7 +73,15 @@ private class ExtensionRegistrarConfigurator(testServices: TestServices) : Envir
         // Initialize the logger for tests (enable both user and debug logs).
         // Disable aiAssist so golden `.errors.txt` files exercise diagnostic content only,
         // not the trailing CTA banner — the CTA has its own coverage in KoinDiagnosticTest.
-        KoinPluginLogger.init(messageCollector, userLogs = true, debugLogs = true, compileSafety = true, aiAssist = false)
+        val publishHints = KoinTestDirectives.PUBLISH_HINTS_OFF !in module.directives
+        KoinPluginLogger.init(
+            messageCollector,
+            userLogs = true,
+            debugLogs = true,
+            compileSafety = true,
+            publishHints = publishHints,
+            aiAssist = false,
+        )
         FirExtensionRegistrarAdapter.registerExtension(KoinPluginRegistrar())
         IrGenerationExtension.registerExtension(KoinIrExtension(lookupTracker = null, expectActualTracker = org.jetbrains.kotlin.incremental.components.ExpectActualTracker.DoNothing, messageCollector = messageCollector, flagsHandle = KoinPluginLogger.captureFlags()))
     }

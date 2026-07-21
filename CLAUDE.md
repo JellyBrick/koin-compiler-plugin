@@ -7,6 +7,8 @@ A native Kotlin Compiler Plugin for Koin dependency injection. Transforms `singl
 - **Evidence-based claims.** "fixed/verified/done" must cite file:line, test output, or a box-test run — never "looks right + tests pass".
 - **Falsify, don't confirm.** A box test must try to BREAK the transformation. Prove RED before GREEN: a regression test must fail on the unfixed code.
 - **Silent is worse than broken.** Dropping an annotation value, skipping a definition, or binding an unexpected type *without a diagnostic* is the worst failure class for a compiler plugin — when in doubt, emit an error/warning rather than degrade silently.
+- **Box tests do not assert compiler messages.** JvmBoxTest checks runtime `box()` plus IR goldens only; a KOIN-D00x reported through the MessageCollector fires invisibly there (box/safety/startkoin_full_graph hid a false KOIN-D001 this way for months). Any testData shape that can emit a diagnostic needs a `testData/diagnostics/` twin, whose `.errors.txt` golden is what actually pins the message.
+- **Golden updates race across runners.** `-Pupdate.testdata=true` on the FULL suite lets JvmDiagnosticTest and JvmErrorMessageTest rewrite the same `.kt` concurrently and can truncate it. Update goldens one runner at a time (`--tests "*JvmDiagnosticTestGenerated.testX"`, then the ErrorMessage twin), then re-run plain.
 
 > **SURPRISE RULE — mandatory.** If the project surprises you or contradicts these docs, STOP, tell the user, and record it here. "Surprising" = not inferable from the code in one grep.
 

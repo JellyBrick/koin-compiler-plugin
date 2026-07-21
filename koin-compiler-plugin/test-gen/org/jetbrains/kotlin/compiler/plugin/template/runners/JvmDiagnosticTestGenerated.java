@@ -87,6 +87,24 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   }
 
   @Test
+  @TestMetadata("componentscan_config_sibling_ok.kt")
+  public void testComponentscan_config_sibling_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/componentscan_config_sibling_ok.kt");
+  }
+
+  @Test
+  @TestMetadata("componentscan_config_sibling_publish_hints_off_ok.kt")
+  public void testComponentscan_config_sibling_publish_hints_off_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/componentscan_config_sibling_publish_hints_off_ok.kt");
+  }
+
+  @Test
+  @TestMetadata("componentscan_sibling_qualified_shadowing_ok.kt")
+  public void testComponentscan_sibling_qualified_shadowing_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/componentscan_sibling_qualified_shadowing_ok.kt");
+  }
+
+  @Test
   @TestMetadata("configuration_label_mismatch.kt")
   public void testConfiguration_label_mismatch() {
     runTest("koin-compiler-plugin/testData/diagnostics/configuration_label_mismatch.kt");
@@ -105,6 +123,18 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   }
 
   @Test
+  @TestMetadata("cross_module_sibling_componentscan_ok.kt")
+  public void testCross_module_sibling_componentscan_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/cross_module_sibling_componentscan_ok.kt");
+  }
+
+  @Test
+  @TestMetadata("cross_module_sibling_componentscan_publish_hints_off_ok.kt")
+  public void testCross_module_sibling_componentscan_publish_hints_off_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/cross_module_sibling_componentscan_publish_hints_off_ok.kt");
+  }
+
+  @Test
   @TestMetadata("cross_module_sibling_koinapp_ok.kt")
   public void testCross_module_sibling_koinapp_ok() {
     runTest("koin-compiler-plugin/testData/diagnostics/cross_module_sibling_koinapp_ok.kt");
@@ -120,6 +150,12 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   @TestMetadata("dsl_module_unreachable.kt")
   public void testDsl_module_unreachable() {
     runTest("koin-compiler-plugin/testData/diagnostics/dsl_module_unreachable.kt");
+  }
+
+  @Test
+  @TestMetadata("dsl_params_lambda_provider_only_ok.kt")
+  public void testDsl_params_lambda_provider_only_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/dsl_params_lambda_provider_only_ok.kt");
   }
 
   @Test

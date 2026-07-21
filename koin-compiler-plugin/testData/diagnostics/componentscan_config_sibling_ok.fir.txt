@@ -1,0 +1,69 @@
+FILE: ports.kt
+    package app.port
+
+    public abstract interface GreeterPort : R|kotlin/Any| {
+        public abstract fun greet(): R|kotlin/String|
+
+    }
+FILE: usecase.kt
+    package app.usecase
+
+    @R|org/koin/core/annotation/Single|() public final class GreetUseCase : R|kotlin/Any| {
+        public constructor(greeter: R|app/port/GreeterPort|): R|app/usecase/GreetUseCase| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val greeter: R|app/port/GreeterPort| = R|<local>/greeter|
+            public get(): R|app/port/GreeterPort|
+
+    }
+FILE: impl.kt
+    package boot.impl
+
+    @R|org/koin/core/annotation/Single|() public final class DefaultGreeter : R|app/port/GreeterPort| {
+        public constructor(): R|boot/impl/DefaultGreeter| {
+            super<R|kotlin/Any|>()
+        }
+
+        public open override fun greet(): R|kotlin/String| {
+            ^greet String(hello)
+        }
+
+    }
+FILE: main.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/Configuration|() @R|org/koin/core/annotation/ComponentScan|(value = vararg(String(app.usecase))) public final class UseCaseScanModule : R|kotlin/Any| {
+        public constructor(): R|UseCaseScanModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/Configuration|() @R|org/koin/core/annotation/ComponentScan|(value = vararg(String(boot.impl))) public final class ImplScanModule : R|kotlin/Any| {
+        public constructor(): R|ImplScanModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/KoinApplication|(modules = <collectionLiteralCall>(<getClass>(Q|UseCaseScanModule|), <getClass>(Q|ImplScanModule|))) public final object MyApp : R|kotlin/Any| {
+        private constructor(): R|MyApp| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final fun main(): R|kotlin/Unit| {
+        R|org/koin/plugin/module/dsl/startKoin|<R|MyApp|>(<L> = startKoin@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            ^@startKoin Unit
+        }
+        )
+    }
+FILE: /useCaseScanModuleModule.kt
+    public final fun R|UseCaseScanModule|.module(): R|org/koin/core/module/Module|
+FILE: /implScanModuleModule.kt
+    public final fun R|ImplScanModule|.module(): R|org/koin/core/module/Module|
+FILE: org/koin/plugin/hints/useCaseScanModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun configuration_default(contributed: R|UseCaseScanModule|): R|kotlin/Unit|
+FILE: org/koin/plugin/hints/implScanModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun configuration_default(contributed: R|ImplScanModule|): R|kotlin/Unit|

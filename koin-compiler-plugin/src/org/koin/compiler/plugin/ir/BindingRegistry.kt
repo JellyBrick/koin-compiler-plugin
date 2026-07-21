@@ -790,6 +790,12 @@ class BindingRegistry {
             is Definition.FunctionDef -> analyzer.analyzeFunction(def.irFunction)
             is Definition.TopLevelFunctionDef -> analyzer.analyzeFunction(def.irFunction)
             is Definition.DslDef -> {
+                // Provider-only DSL definitions are constructed by the user's own lambda
+                // (`single<T> { instance }`, `create(::function)`, `factory { params ->
+                // T(params.get()) }`) — the plugin never wires T's constructor, so its
+                // parameters are not graph requirements. Validating them anyway demanded
+                // call-site-supplied values (parametersOf) from the DI graph → false KOIN-D001.
+                if (def.providerOnly) return emptyList()
                 val constructor = findConstructorToUse(def.irClass)
                 if (constructor != null) analyzer.analyzeConstructor(constructor) else emptyList()
             }

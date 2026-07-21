@@ -519,15 +519,24 @@ class KoinAnnotationProcessor(
         // @KoinApplication (the #51 sibling shape). cachedModuleDefinitions is populated in
         // generateModuleExtensions Step 1, before any A2 validation runs.
         //
-        // Deliberately EXCLUDES component-scanned class definitions (Definition.ClassDef): those belong
-        // to a @ComponentScan / @Configuration group whose cross-module assembly is governed by the
-        // consumer's own visibility set (A2) and the entry-point graph (A3). Treating a class from a
-        // *different* @Configuration group as a graph-wide provider would wrongly defer a genuine
-        // label-mismatch miss (e.g. configuration_label_mismatch: @Configuration("core") Repository is
-        // not assembled into @Configuration("service")) — it must stay a hard KOIN-D001, not W002.
-        cachedModuleDefinitions?.values?.forEach { defs ->
+        // Deliberately EXCLUDES component-scanned class definitions (Definition.ClassDef) of
+        // LABEL-GATED (@Configuration-annotated) modules: their cross-module assembly is governed
+        // by configuration labels, via the consumer's own visibility set (A2) and the entry-point
+        // graph (A3). Treating a class from a *different* @Configuration group as a graph-wide
+        // provider would wrongly defer a genuine label-mismatch miss (e.g.
+        // configuration_label_mismatch: @Configuration("core") Repository is not assembled into
+        // @Configuration("service")) — it must stay a hard KOIN-D001, not W002.
+        //
+        // ClassDefs of modules WITHOUT @Configuration are included: their assembly is not label
+        // gated — they are linked via @KoinApplication(modules=[…]) exactly like the #51 sibling
+        // shape — so they are legitimate graph-wide providers, same as sibling FunctionDefs.
+        // Excluding them made a @ComponentScan sibling's class provider look "genuinely missing"
+        // whenever no hint callables were available (publishHints=false) and hard-errored
+        // KOIN-D001 at A2 for a dependency that resolves fine at the entry point.
+        cachedModuleDefinitions?.forEach { (moduleClass, defs) ->
+            val labelGated = hasConfigurationAnnotation(moduleClass.irClass)
             for (def in defs) {
-                if (def is Definition.ClassDef) continue
+                if (def is Definition.ClassDef && labelGated) continue
                 def.returnTypeClass.fqNameWhenAvailable?.asString()?.let { types.add(it) }
                 for (binding in def.bindings) {
                     binding.fqNameWhenAvailable?.asString()?.let { types.add(it) }
@@ -2859,12 +2868,16 @@ class KoinAnnotationProcessor(
         val modulesByFqName = getModulesByFqName()
         var allComplete = true
 
-        // Memory optimization: pre-allocate a FqName set for deduplication across all sources.
-        // Without this, definitions from multiple included modules and siblings could overlap,
-        // causing downstream consumers to process duplicates.
-        val seenFqNames = HashSet<FqName>(ownDefinitions.size * 2)
+        // Deduplication across all sources: the same logical definition can be reached through
+        // several paths (own defs, includes, siblings — local IrClass and external hint stub).
+        // The key is (type, qualifier, scope), matching BindingRegistry's ProviderKey notion.
+        // Keying on the bare return-type FqName over-collapsed DISTINCT providers of the same
+        // type that differ only by qualifier (a @Named sibling definition shadowed the
+        // unqualified one), silently dropping real bindings from the A2 visibility set and
+        // false-positive KOIN-D001 with a "similar binding" hint.
+        val seenKeys = HashSet<String>(ownDefinitions.size * 2)
         for (def in ownDefinitions) {
-            def.returnTypeClass.fqNameWhenAvailable?.let { seenFqNames.add(it) }
+            seenKeys.add(definitionDedupKey(def))
         }
 
         val definitions = buildList {
@@ -2877,8 +2890,7 @@ class KoinAnnotationProcessor(
                     // Local included module — deduplicate before adding
                     val includedDefs = allModuleDefinitions[includedModule] ?: emptyList()
                     for (def in includedDefs) {
-                        val fqName = def.returnTypeClass.fqNameWhenAvailable
-                        if (fqName == null || seenFqNames.add(fqName)) {
+                        if (seenKeys.add(definitionDedupKey(def))) {
                             add(def)
                         }
                     }
@@ -2887,8 +2899,7 @@ class KoinAnnotationProcessor(
                     val includedFqName = included.fqNameWhenAvailable?.asString() ?: continue
                     val result = collectDefinitionsFromDependencyModule(includedFqName)
                     for (def in result.definitions) {
-                        val fqName = def.returnTypeClass.fqNameWhenAvailable
-                        if (fqName == null || seenFqNames.add(fqName)) {
+                        if (seenKeys.add(definitionDedupKey(def))) {
                             add(def)
                         }
                     }
@@ -2915,8 +2926,7 @@ class KoinAnnotationProcessor(
                         // Local sibling — deduplicate before adding
                         val siblingDefs = allModuleDefinitions[sibling] ?: emptyList()
                         for (def in siblingDefs) {
-                            val fqName = def.returnTypeClass.fqNameWhenAvailable
-                            if (fqName == null || seenFqNames.add(fqName)) {
+                            if (seenKeys.add(definitionDedupKey(def))) {
                                 add(def)
                             }
                         }
@@ -2924,8 +2934,7 @@ class KoinAnnotationProcessor(
                         // Cross-Gradle-module sibling — resolve from JAR + module scan hints
                         val result = collectDefinitionsFromDependencyModule(siblingFqName)
                         for (def in result.definitions) {
-                            val fqName = def.returnTypeClass.fqNameWhenAvailable
-                            if (fqName == null || seenFqNames.add(fqName)) {
+                            if (seenKeys.add(definitionDedupKey(def))) {
                                 add(def)
                             }
                         }
@@ -2935,6 +2944,37 @@ class KoinAnnotationProcessor(
             }
         }
         return VisibilityResult(definitions, allComplete)
+    }
+
+    /**
+     * Memoized (type, qualifier, scope) dedup key for [buildVisibleDefinitions] — the identity a
+     * definition has as a PROVIDER, mirroring BindingRegistry's ProviderKey. Two definitions with
+     * the same key are interchangeable for validation; two definitions differing in qualifier or
+     * scope are distinct bindings and must both stay in the visibility set.
+     *
+     * Memoized because visibility sets are rebuilt per A2 module over largely the same sibling
+     * definitions, and qualifier extraction walks IR annotations.
+     */
+    private val definitionDedupKeyCache = HashMap<Definition, String>()
+
+    private fun definitionDedupKey(def: Definition): String = definitionDedupKeyCache.getOrPut(def) {
+        val typeFqName = def.returnTypeClass.fqNameWhenAvailable?.asString()
+            ?: "<anon>@${System.identityHashCode(def.returnTypeClass)}"
+        val qualifier = when (def) {
+            is Definition.ClassDef -> def.qualifier ?: qualifierExtractor.extractFromClass(def.irClass)
+            is Definition.FunctionDef -> qualifierExtractor.extractFromDeclaration(def.irFunction)
+            is Definition.TopLevelFunctionDef -> qualifierExtractor.extractFromDeclaration(def.irFunction)
+            is Definition.DslDef -> def.qualifier ?: qualifierExtractor.extractFromClass(def.irClass)
+            is Definition.ExternalFunctionDef -> def.qualifier
+        }
+        val qualifierKey = when (qualifier) {
+            is QualifierValue.StringQualifier -> "named:${qualifier.name}"
+            is QualifierValue.TypeQualifier ->
+                "type:${qualifier.irClass.fqNameWhenAvailable?.asString() ?: qualifier.irClass.name.asString()}"
+            null -> ""
+        }
+        val scopeKey = def.scopeClass?.fqNameWhenAvailable?.asString() ?: def.scopeName ?: ""
+        "$typeFqName|$qualifierKey|$scopeKey"
     }
 
     /**
@@ -2955,6 +2995,23 @@ class KoinAnnotationProcessor(
         // hints can resolve to distinct IrClass instances (external stub vs local), and identity
         // dedup misses that. Matches the fix in KoinStartTransformer.discoverModulesFromHints.
         val seenFqNames = mutableSetOf<String>()
+
+        // Local @Configuration siblings come straight from the in-memory module list, BEFORE the
+        // hint query: configuration_<label> hint callables only exist when this compilation
+        // publishes hints, but same-compilation siblings must stay visible with
+        // publishHints=false too. Otherwise a dependency on a sibling scan-module's definition
+        // loses all A2 visibility and false-positives KOIN-D001 (the provider is right there in
+        // the same compilation, assembled with the consumer at the entry point).
+        for (localModule in moduleClasses) {
+            val siblingLabels = extractConfigurationLabels(localModule.irClass)
+            if (siblingLabels.none { it in labels }) continue
+            val fqName = localModule.irClass.fqNameWhenAvailable?.asString()
+                ?: "<anon>@${System.identityHashCode(localModule.irClass)}"
+            if (seenFqNames.add(fqName)) {
+                modules.add(localModule.irClass)
+            }
+        }
+
         val hintsPackage = KoinModuleFirGenerator.HINTS_PACKAGE
 
         for (label in labels) {
@@ -2973,7 +3030,7 @@ class KoinAnnotationProcessor(
             }
         }
 
-        KoinPluginLogger.debug { "A2: Discovered ${modules.size} @Configuration siblings from hints for labels $labels" }
+        KoinPluginLogger.debug { "A2: Discovered ${modules.size} @Configuration siblings (local + hints) for labels $labels" }
         configurationModulesCache[cacheKey] = modules
         return modules
     }

@@ -1,0 +1,80 @@
+FILE: scopes.kt
+    package app.scopes
+
+    public final class WorkScope : R|kotlin/Any| {
+        public constructor(): R|app/scopes/WorkScope| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+FILE: usecase.kt
+    package app.usecase
+
+    @R|org/koin/core/annotation/Single|() public final class Worker : R|kotlin/Any| {
+        public constructor(scope: R|app/scopes/WorkScope|): R|app/usecase/Worker| {
+            super<R|kotlin/Any|>()
+        }
+
+        public final val scope: R|app/scopes/WorkScope| = R|<local>/scope|
+            public get(): R|app/scopes/WorkScope|
+
+    }
+FILE: main.kt
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/Configuration|() public final class EventModule : R|kotlin/Any| {
+        public constructor(): R|EventModule| {
+            super<R|kotlin/Any|>()
+        }
+
+        @R|org/koin/core/annotation/Single|() @R|org/koin/core/annotation/Named|(value = String(eventBus)) public final fun eventBusScope(): R|app/scopes/WorkScope| {
+            ^eventBusScope R|app/scopes/WorkScope.WorkScope|()
+        }
+
+    }
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/Configuration|() public final class InfraModule : R|kotlin/Any| {
+        public constructor(): R|InfraModule| {
+            super<R|kotlin/Any|>()
+        }
+
+        @R|org/koin/core/annotation/Single|() public final fun workScope(): R|app/scopes/WorkScope| {
+            ^workScope R|app/scopes/WorkScope.WorkScope|()
+        }
+
+    }
+    @R|org/koin/core/annotation/Module|() @R|org/koin/core/annotation/Configuration|() @R|org/koin/core/annotation/ComponentScan|(value = vararg(String(app.usecase))) public final class UseCaseScanModule : R|kotlin/Any| {
+        public constructor(): R|UseCaseScanModule| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    @R|org/koin/core/annotation/KoinApplication|(modules = <collectionLiteralCall>(<getClass>(Q|EventModule|), <getClass>(Q|InfraModule|), <getClass>(Q|UseCaseScanModule|))) public final object MyApp : R|kotlin/Any| {
+        private constructor(): R|MyApp| {
+            super<R|kotlin/Any|>()
+        }
+
+    }
+    public final fun main(): R|kotlin/Unit| {
+        R|org/koin/plugin/module/dsl/startKoin|<R|MyApp|>(<L> = startKoin@fun R|org/koin/core/KoinApplication|.<anonymous>(): R|kotlin/Unit| <inline=NoInline>  {
+            ^@startKoin Unit
+        }
+        )
+    }
+FILE: /eventModuleModule.kt
+    public final fun R|EventModule|.module(): R|org/koin/core/module/Module|
+FILE: /infraModuleModule.kt
+    public final fun R|InfraModule|.module(): R|org/koin/core/module/Module|
+FILE: /useCaseScanModuleModule.kt
+    public final fun R|UseCaseScanModule|.module(): R|org/koin/core/module/Module|
+FILE: org/koin/plugin/hints/eventModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun configuration_default(contributed: R|EventModule|): R|kotlin/Unit|
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_eventModule__eventBusScope(contributed: R|app/scopes/WorkScope|, qualifier_eventBus: R|kotlin/Unit|): R|kotlin/Unit|
+FILE: org/koin/plugin/hints/infraModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun configuration_default(contributed: R|InfraModule|): R|kotlin/Unit|
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun moduledef_infraModule__workScope(contributed: R|app/scopes/WorkScope|): R|kotlin/Unit|
+FILE: org/koin/plugin/hints/useCaseScanModuleModule.kt
+    package org.koin.plugin.hints
+
+    @R|kotlin/Deprecated|(message = String(Koin compiler plugin internal hint function), level = Q|kotlin/DeprecationLevel|.R|kotlin/DeprecationLevel.HIDDEN|) public final fun configuration_default(contributed: R|UseCaseScanModule|): R|kotlin/Unit|
