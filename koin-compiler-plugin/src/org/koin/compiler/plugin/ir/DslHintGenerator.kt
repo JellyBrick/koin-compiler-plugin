@@ -20,6 +20,7 @@ import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.Name
+import org.koin.compiler.adapter.KotlinAdapterLoader
 import org.koin.compiler.plugin.KoinPluginConstants
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.fir.KoinModuleFirGenerator
@@ -98,7 +99,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 type = targetClass.hintParameterType(context),
                 isAssignable = false,
                 symbol = IrValueParameterSymbolImpl(),
-                index = 0,
+                kind = IrParameterKind.Regular,
                 varargElementType = null,
                 isCrossinline = false,
                 isNoinline = false,
@@ -117,7 +118,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                     type = binding.hintParameterType(context),
                     isAssignable = false,
                     symbol = IrValueParameterSymbolImpl(),
-                    index = bindingIndex + 1,
+                    kind = IrParameterKind.Regular,
                     varargElementType = null,
                     isCrossinline = false,
                     isNoinline = false,
@@ -138,7 +139,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                     type = context.irBuiltIns.unitType,
                     isAssignable = false,
                     symbol = IrValueParameterSymbolImpl(),
-                    index = params.size,
+                    kind = IrParameterKind.Regular,
                     varargElementType = null,
                     isCrossinline = false,
                     isNoinline = false,
@@ -158,7 +159,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                     type = context.irBuiltIns.unitType,
                     isAssignable = false,
                     symbol = IrValueParameterSymbolImpl(),
-                    index = params.size,
+                    kind = IrParameterKind.Regular,
                     varargElementType = null,
                     isCrossinline = false,
                     isNoinline = false,
@@ -181,7 +182,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                         type = context.irBuiltIns.unitType,
                         isAssignable = false,
                         symbol = IrValueParameterSymbolImpl(),
-                        index = params.size,
+                        kind = IrParameterKind.Regular,
                         varargElementType = null,
                         isCrossinline = false,
                         isNoinline = false,
@@ -200,7 +201,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
                         type = defQualifier.irClass.defaultType,
                         isAssignable = false,
                         symbol = IrValueParameterSymbolImpl(),
-                        index = params.size,
+                        kind = IrParameterKind.Regular,
                         varargElementType = null,
                         isCrossinline = false,
                         isNoinline = false,
@@ -212,15 +213,16 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 null -> {}
             }
 
-            function.valueParameters = params
+            function.parameters = params
 
             // Empty body (stub — hint functions are never called)
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
 
             // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets.
-            // Reuse the shared annotation built outside the loop.
+            // Reuse the shared annotation built outside the loop; routed through the version
+            // adapter — the annotations list type is version-split in Kotlin 2.4.0.
             if (sharedDeprecated != null) {
-                function.annotations = listOf(sharedDeprecated)
+                KotlinAdapterLoader.current.setAnnotations(function, listOf(sharedDeprecated))
             } else {
                 function.addDeprecatedHiddenAnnotation(context)
             }
@@ -238,13 +240,6 @@ class DslHintGenerator(private val context: IrPluginContext) {
             // (no dex merge collision). See KoinPluginConstants.OPTION_MODULE_ID.
             val prefix = HintFilePrefix.of(firModuleData.name.asString())
             val fileName = prefix + buildDslHintFileName(targetClassId, hintName)
-
-            val firFile = buildFile {
-                moduleData = firModuleData
-                origin = FirDeclarationOrigin.Synthetic.PluginFile
-                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-                name = fileName
-            }
 
             // Anchor the synthetic hint file on a stable source path from the current compile
             // unit (see issue #32). Priority:
@@ -266,6 +261,16 @@ class DslHintGenerator(private val context: IrPluginContext) {
                 ?: moduleFragment.files.minByOrNull { it.fileEntry.name }?.fileEntry?.name
                 ?: "/synthetic"
             val fakeNewPath = Path(basePath).parent.resolve(fileName)
+
+            val firFile = buildFile {
+                moduleData = firModuleData
+                origin = FirDeclarationOrigin.Synthetic.PluginFile
+                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+                name = fileName
+                // KLIB metadata serialization (Native/JS/Wasm) requires a resolvable io
+                // File per file; a null sourceFile fails the wasm/js serializer (KT-82395).
+                sourceFile = syntheticHintSourceFile(fakeNewPath.absolutePathString())
+            }
 
             val hintFile = IrFileImpl(
                 fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
@@ -343,7 +348,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
 
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
-                for (param in hintFunc.valueParameters) {
+                for (param in hintFunc.regularParameters) {
                     val paramClass = (param.type.classifierOrNull as? IrClassSymbol)?.owner ?: continue
                     paramClass.fqNameWhenAvailable?.asString()?.let { types.add(it) }
                 }
@@ -381,7 +386,7 @@ class DslHintGenerator(private val context: IrPluginContext) {
 
             for (hintFuncSymbol in hintFunctions) {
                 val hintFunc = hintFuncSymbol.owner
-                val params = hintFunc.valueParameters
+                val params = hintFunc.regularParameters
                 if (params.isEmpty()) continue
 
                 // First param is the concrete type, remaining are bindings

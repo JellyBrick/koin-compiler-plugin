@@ -43,6 +43,12 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
     }
 
     @Test
+    @TestMetadata("single_fun_created_at_start.kt")
+    public void testSingle_fun_created_at_start() {
+      runTest("koin-compiler-plugin/testData/box/annotations/single_fun_created_at_start.kt");
+    }
+
+    @Test
     @TestMetadata("singleton_class.kt")
     public void testSingleton_class() {
       runTest("koin-compiler-plugin/testData/box/annotations/singleton_class.kt");
@@ -68,6 +74,12 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
     @TestMetadata("delegation_no_autobind.kt")
     public void testDelegation_no_autobind() {
       runTest("koin-compiler-plugin/testData/box/bindings/delegation_no_autobind.kt");
+    }
+
+    @Test
+    @TestMetadata("exclude_koincomponent.kt")
+    public void testExclude_koincomponent() {
+      runTest("koin-compiler-plugin/testData/box/bindings/exclude_koincomponent.kt");
     }
 
     @Test
@@ -160,6 +172,12 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
     @TestMetadata("component_scan_basic.kt")
     public void testComponent_scan_basic() {
       runTest("koin-compiler-plugin/testData/box/modules/component_scan_basic.kt");
+    }
+
+    @Test
+    @TestMetadata("cross_module_componentscan_dedup.kt")
+    public void testCross_module_componentscan_dedup() {
+      runTest("koin-compiler-plugin/testData/box/modules/cross_module_componentscan_dedup.kt");
     }
 
     @Test
@@ -299,6 +317,24 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
     }
 
     @Test
+    @TestMetadata("dsl_create_function_outer_qualifier.kt")
+    public void testDsl_create_function_outer_qualifier() {
+      runTest("koin-compiler-plugin/testData/box/safety/dsl_create_function_outer_qualifier.kt");
+    }
+
+    @Test
+    @TestMetadata("dsl_create_outer_qualifier_priority.kt")
+    public void testDsl_create_outer_qualifier_priority() {
+      runTest("koin-compiler-plugin/testData/box/safety/dsl_create_outer_qualifier_priority.kt");
+    }
+
+    @Test
+    @TestMetadata("dsl_create_outer_type_qualifier.kt")
+    public void testDsl_create_outer_type_qualifier() {
+      runTest("koin-compiler-plugin/testData/box/safety/dsl_create_outer_type_qualifier.kt");
+    }
+
+    @Test
     @TestMetadata("dsl_injected_param_d006.kt")
     public void testDsl_injected_param_d006() {
       runTest("koin-compiler-plugin/testData/box/safety/dsl_injected_param_d006.kt");
@@ -317,6 +353,12 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
     }
 
     @Test
+    @TestMetadata("dsl_single_existing_instance.kt")
+    public void testDsl_single_existing_instance() {
+      runTest("koin-compiler-plugin/testData/box/safety/dsl_single_existing_instance.kt");
+    }
+
+    @Test
     @TestMetadata("dsl_transitive_includes.kt")
     public void testDsl_transitive_includes() {
       runTest("koin-compiler-plugin/testData/box/safety/dsl_transitive_includes.kt");
@@ -326,6 +368,12 @@ public class JvmBoxTestGenerated extends AbstractJvmBoxTest {
     @TestMetadata("generic_dsl_type_no_crash.kt")
     public void testGeneric_dsl_type_no_crash() {
       runTest("koin-compiler-plugin/testData/box/safety/generic_dsl_type_no_crash.kt");
+    }
+
+    @Test
+    @TestMetadata("injected_param_dual_definition_single_hint.kt")
+    public void testInjected_param_dual_definition_single_hint() {
+      runTest("koin-compiler-plugin/testData/box/safety/injected_param_dual_definition_single_hint.kt");
     }
 
     @Test

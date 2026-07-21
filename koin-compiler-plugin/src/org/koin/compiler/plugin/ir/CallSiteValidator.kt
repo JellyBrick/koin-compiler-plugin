@@ -21,6 +21,7 @@ import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.Name
 import org.koin.compiler.plugin.KoinDiagnostic
+import org.koin.compiler.adapter.KotlinAdapterLoader
 import org.koin.compiler.plugin.KoinPluginConstants
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.ProvidedTypeRegistry
@@ -271,22 +272,23 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 type = targetClass.hintParameterType(context),
                 isAssignable = false,
                 symbol = IrValueParameterSymbolImpl(),
-                index = 0,
+                kind = IrParameterKind.Regular,
                 varargElementType = null,
                 isCrossinline = false,
                 isNoinline = false,
                 isHidden = false
             )
             requiredParam.parent = function
-            function.valueParameters = listOf(requiredParam)
+            function.parameters = listOf(requiredParam)
 
             // Empty body (stub — hint functions are never called)
             function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
 
             // Mark as @Deprecated(HIDDEN) to prevent ObjC export crashes on Native targets.
-            // Reuse the per-batch shared annotation.
+            // Reuse the per-batch shared annotation; routed through the version adapter —
+            // the annotations list type is version-split in Kotlin 2.4.0.
             if (sharedDeprecated != null) {
-                function.annotations = listOf(sharedDeprecated)
+                KotlinAdapterLoader.current.setAnnotations(function, listOf(sharedDeprecated))
             } else {
                 function.addDeprecatedHiddenAnnotation(context)
             }
@@ -298,13 +300,6 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 .replaceFirstChar { it.lowercaseChar() }
             val fileName = "${modulePrefix}${sanitizedName}_callsite.kt"
 
-            val firFile = buildFile {
-                moduleData = firModuleData
-                origin = FirDeclarationOrigin.Synthetic.PluginFile
-                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-                name = fileName
-            }
-
             // Anchor the synthetic hint file on the call site's source file so the path stays
             // stable across incremental rebuilds (see issue #32). Fall back to the
             // alphabetically-first source file in the module — also stable, just less local.
@@ -312,6 +307,16 @@ class CallSiteValidator(private val context: IrPluginContext) {
                 ?: moduleFragment.files.minByOrNull { it.fileEntry.name }?.fileEntry?.name
                 ?: "/synthetic"
             val fakeNewPath = Path(basePath).parent.resolve(fileName)
+
+            val firFile = buildFile {
+                moduleData = firModuleData
+                origin = FirDeclarationOrigin.Synthetic.PluginFile
+                packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+                name = fileName
+                // KLIB metadata serialization (Native/JS/Wasm) requires a resolvable io
+                // File per file; a null sourceFile fails the wasm/js serializer (KT-82395).
+                sourceFile = syntheticHintSourceFile(fakeNewPath.absolutePathString())
+            }
 
             val hintFile = IrFileImpl(
                 fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
@@ -365,7 +370,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
 
         for (hintFuncSymbol in hintFunctions) {
             val hintFunc = hintFuncSymbol.owner
-            val param = hintFunc.valueParameters.firstOrNull() ?: continue
+            val param = hintFunc.regularParameters.firstOrNull() ?: continue
             val targetClass = (param.type.classifierOrNull as? IrClassSymbol)?.owner ?: continue
             val targetFqName = targetClass.fqNameWhenAvailable?.asString() ?: continue
 
@@ -439,7 +444,7 @@ class CallSiteValidator(private val context: IrPluginContext) {
         var errorCount = 0
         for (hintFuncSymbol in hintFunctions) {
             val hintFunc = hintFuncSymbol.owner
-            val param = hintFunc.valueParameters.firstOrNull() ?: continue
+            val param = hintFunc.regularParameters.firstOrNull() ?: continue
             val targetClass = (param.type.classifierOrNull as? IrClassSymbol)?.owner ?: continue
             val targetFqName = targetClass.fqNameWhenAvailable?.asString() ?: continue
 

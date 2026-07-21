@@ -20,6 +20,7 @@ import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.name.StandardClassIds
+import org.koin.compiler.adapter.KotlinAdapterLoader
 
 /**
  * Adds `@Deprecated("Koin compiler plugin internal hint function", level = DeprecationLevel.HIDDEN)`
@@ -32,7 +33,9 @@ import org.jetbrains.kotlin.name.StandardClassIds
  */
 fun IrSimpleFunction.addDeprecatedHiddenAnnotation(context: IrPluginContext) {
     val annotation = buildDeprecatedHiddenAnnotation(context) ?: return
-    annotations = annotations + annotation
+    // The annotations list type is version-split in Kotlin 2.4.0 — assignment
+    // goes through the adapter matching the running compiler.
+    KotlinAdapterLoader.current.setAnnotations(this, annotations + annotation)
 }
 
 /**
@@ -40,17 +43,18 @@ fun IrSimpleFunction.addDeprecatedHiddenAnnotation(context: IrPluginContext) {
  *
  * Symbol-table lookups (`referenceClass`) and `declarations.filterIsInstance<...>().firstOrNull`
  * walks are not free — `kotlin.Deprecated` has many constructors and `DeprecationLevel` enumerates
- * 4 entries. For a module with 70 `@Factory` we emit 70+ hint functions, so the un-cached form
- * paid that resolution 70+ times per module. We cache the symbol lookups in this template; the
- * actual `IrConstructorCall` is still cheap to allocate per call site, but callers that emit
- * many hint functions in one batch should call [buildDeprecatedHiddenAnnotation] once and
- * reuse the result via `function.annotations + sharedAnnotation`. `IrConstructorCall` is an
- * `IrExpression` with no `parent` field, so reusing one instance across multiple functions'
- * annotation lists is safe (only `IrDeclaration` subclasses care about parent uniqueness).
+ * 4 entries. Callers that emit many hint functions in one batch amortize by calling
+ * [buildDeprecatedHiddenAnnotation] once and reusing the result (the `sharedDeprecated` pattern
+ * in every hint generator), so template resolution runs a handful of times per compilation.
+ * `IrConstructorCall` is an `IrExpression` with no `parent` field, so reusing one instance across
+ * multiple functions' annotation lists is safe (only `IrDeclaration` subclasses care about parent
+ * uniqueness).
  *
- * Keyed by `IrPluginContext` identity so each IR pass / plugin instantiation gets its own cache.
- * Concurrent compile invocations from different daemons run with separate contexts so there's no
- * cross-compilation pollution.
+ * Deliberately NOT cached in a process-global map keyed by `IrPluginContext`: the resolved
+ * symbols strongly reference the context's symbol table, so a `WeakHashMap<IrPluginContext, _>`
+ * whose values reach back to the key never expires — every compilation's full IR world stays
+ * pinned for the daemon's lifetime (observed as suite-wide OOM in the in-process test runner),
+ * and an unsynchronized global map is also unsafe under parallel daemon compilations (KTZ-4414).
  */
 private class DeprecatedHiddenAnnotationTemplate(
     val deprecatedClassSymbol: IrClassSymbol,
@@ -61,41 +65,24 @@ private class DeprecatedHiddenAnnotationTemplate(
     val messageType: IrType,
 )
 
-private val templateCache = java.util.WeakHashMap<IrPluginContext, DeprecatedHiddenAnnotationTemplate?>()
-
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 private fun resolveTemplate(context: IrPluginContext): DeprecatedHiddenAnnotationTemplate? {
-    // WeakHashMap.computeIfAbsent doesn't tolerate null returns, so do the get/put dance manually.
-    if (templateCache.containsKey(context)) return templateCache[context]
-
     val deprecatedClassSymbol = context.referenceClass(StandardClassIds.Annotations.Deprecated)
-    if (deprecatedClassSymbol == null) {
-        templateCache[context] = null
-        return null
-    }
+        ?: return null
     val constructor = deprecatedClassSymbol.owner.declarations
         .filterIsInstance<IrConstructor>()
         .firstOrNull { it.isPrimary }
-    if (constructor == null) {
-        templateCache[context] = null
-        return null
-    }
+        ?: return null
 
     val deprecationLevelClassId = ClassId(FqName("kotlin"), Name.identifier("DeprecationLevel"))
     val deprecationLevelClassSymbol = context.referenceClass(deprecationLevelClassId)
-    if (deprecationLevelClassSymbol == null) {
-        templateCache[context] = null
-        return null
-    }
+        ?: return null
     val hiddenEntry = deprecationLevelClassSymbol.owner.declarations
         .filterIsInstance<IrEnumEntry>()
         .firstOrNull { it.name.asString() == "HIDDEN" }
-    if (hiddenEntry == null) {
-        templateCache[context] = null
-        return null
-    }
+        ?: return null
 
-    val template = DeprecatedHiddenAnnotationTemplate(
+    return DeprecatedHiddenAnnotationTemplate(
         deprecatedClassSymbol = deprecatedClassSymbol,
         deprecatedType = deprecatedClassSymbol.defaultType,
         constructorSymbol = constructor.symbol,
@@ -103,19 +90,17 @@ private fun resolveTemplate(context: IrPluginContext): DeprecatedHiddenAnnotatio
         hiddenEntrySymbol = hiddenEntry.symbol,
         messageType = context.irBuiltIns.stringType,
     )
-    templateCache[context] = template
-    return template
 }
 
 /**
  * Build an `IrConstructorCall` representing `@Deprecated(message = "...", level = DeprecationLevel.HIDDEN)`.
  * Returns null if the Deprecated class cannot be resolved.
  *
- * Symbol-table lookups go through a per-`IrPluginContext` cache (see [resolveTemplate]), so the
- * first call per compile pays the resolution cost and every subsequent call reuses it. Callers
- * that emit many hint functions in one batch should call this once and append the same
+ * Callers that emit many hint functions in one batch should call this once and append the same
  * `IrConstructorCall` to every function's annotation list — `IrConstructorCall` is an
- * `IrExpression` (no `parent` field) so sharing across annotation lists is safe.
+ * `IrExpression` (no `parent` field) so sharing across annotation lists is safe. That per-batch
+ * sharing is the load-bearing optimization; see [DeprecatedHiddenAnnotationTemplate] for why the
+ * symbol resolution is intentionally not cached process-globally.
  */
 @OptIn(DeprecatedForRemovalCompilerApi::class)
 internal fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstructorCall? {
@@ -138,10 +123,12 @@ internal fun buildDeprecatedHiddenAnnotation(context: IrPluginContext): IrConstr
         tpl.deprecatedType,
         tpl.constructorSymbol
     ).apply {
-        // Positional value arguments (used by codegen)
-        // arg 0: message (String); arg 1: replaceWith (defaulted); arg 2: level (DeprecationLevel.HIDDEN)
-        putValueArgument(0, messageExpr)
-        putValueArgument(2, levelExpr)
+        // Set positional value arguments (used by codegen)
+        // arg 0: message (String)
+        putRegularArgument(0, messageExpr)
+        // arg 1: replaceWith — leave as default (null)
+        // arg 2: level (DeprecationLevel.HIDDEN)
+        putRegularArgument(2, levelExpr)
 
         // Argument mapping (used by IR annotation processing and metadata serialization)
         argumentMapping = mapOf(

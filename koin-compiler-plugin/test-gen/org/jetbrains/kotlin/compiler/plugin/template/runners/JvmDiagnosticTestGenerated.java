@@ -33,6 +33,12 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   }
 
   @Test
+  @TestMetadata("call_site_param_indirect_helper.kt")
+  public void testCall_site_param_indirect_helper() {
+    runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_indirect_helper.kt");
+  }
+
+  @Test
   @TestMetadata("call_site_param_missing_d006.kt")
   public void testCall_site_param_missing_d006() {
     runTest("koin-compiler-plugin/testData/diagnostics/call_site_param_missing_d006.kt");
@@ -87,6 +93,24 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   }
 
   @Test
+  @TestMetadata("cross_module_genuine_missing_d001.kt")
+  public void testCross_module_genuine_missing_d001() {
+    runTest("koin-compiler-plugin/testData/diagnostics/cross_module_genuine_missing_d001.kt");
+  }
+
+  @Test
+  @TestMetadata("cross_module_leaf_deferred_w002.kt")
+  public void testCross_module_leaf_deferred_w002() {
+    runTest("koin-compiler-plugin/testData/diagnostics/cross_module_leaf_deferred_w002.kt");
+  }
+
+  @Test
+  @TestMetadata("cross_module_sibling_koinapp_ok.kt")
+  public void testCross_module_sibling_koinapp_ok() {
+    runTest("koin-compiler-plugin/testData/diagnostics/cross_module_sibling_koinapp_ok.kt");
+  }
+
+  @Test
   @TestMetadata("dsl_module_not_loaded.kt")
   public void testDsl_module_not_loaded() {
     runTest("koin-compiler-plugin/testData/diagnostics/dsl_module_not_loaded.kt");
@@ -102,6 +126,12 @@ public class JvmDiagnosticTestGenerated extends AbstractJvmDiagnosticTest {
   @TestMetadata("factory_suspend_fun_interface_d007.kt")
   public void testFactory_suspend_fun_interface_d007() {
     runTest("koin-compiler-plugin/testData/diagnostics/factory_suspend_fun_interface_d007.kt");
+  }
+
+  @Test
+  @TestMetadata("koin_configuration_dsl_module_instance_a3.kt")
+  public void testKoin_configuration_dsl_module_instance_a3() {
+    runTest("koin-compiler-plugin/testData/diagnostics/koin_configuration_dsl_module_instance_a3.kt");
   }
 
   @Test

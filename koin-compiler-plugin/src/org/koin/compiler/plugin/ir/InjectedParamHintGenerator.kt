@@ -23,6 +23,7 @@ import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
+import org.koin.compiler.adapter.KotlinAdapterLoader
 import org.koin.compiler.plugin.KoinPluginConstants
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.fir.KoinModuleFirGenerator
@@ -119,8 +120,15 @@ class InjectedParamHintGenerator(
                 KoinPluginLogger.debug { "InjectedParam: ambiguous target $targetFqName (multiple definitions, different @InjectedParam shapes) — skipping index" }
                 continue
             }
-            localSlots.putIfAbsent(targetFqName, slots)
-            if (publishHints) {
+            // Emit the hint exactly once per target. Multiple definitions can share a
+            // target+shape (e.g. an annotation definition and a DSL definition for the
+            // same type); since they passed the ambiguity check they have identical
+            // shapes, so a single hint is correct. Emitting per-definition produces
+            // duplicate IR functions with identical signatures — tolerated on JVM but
+            // a hard KLIB serialization failure on Native/JS/Wasm (compiler#40, #44).
+            // The index entry is recorded regardless of publishHints — local call-site
+            // validation needs the shape even when metadata emission is disabled.
+            if (localSlots.putIfAbsent(targetFqName, slots) == null && publishHints) {
                 emitHintFunction(moduleFragment, def, targetClass, targetFqName, slots)
             }
         }
@@ -161,10 +169,10 @@ class InjectedParamHintGenerator(
      */
     private fun extractSlotsFromDefinition(def: Definition): List<InjectedParamSlot>? {
         val params: List<IrValueParameter> = when (def) {
-            is Definition.ClassDef -> findInjectableConstructor(def.irClass)?.valueParameters
-            is Definition.DslDef -> findInjectableConstructor(def.irClass)?.valueParameters
-            is Definition.FunctionDef -> def.irFunction.valueParameters
-            is Definition.TopLevelFunctionDef -> def.irFunction.valueParameters
+            is Definition.ClassDef -> findInjectableConstructor(def.irClass)?.regularParameters
+            is Definition.DslDef -> findInjectableConstructor(def.irClass)?.regularParameters
+            is Definition.FunctionDef -> def.irFunction.regularParameters
+            is Definition.TopLevelFunctionDef -> def.irFunction.regularParameters
             is Definition.ExternalFunctionDef -> null
         } ?: return null
 
@@ -216,10 +224,10 @@ class InjectedParamHintGenerator(
         // Re-walk the source params so we can reuse the original IrType for each slot
         // (preserving its nullability) rather than reconstructing it from FqName.
         val sourceParams: List<IrValueParameter> = when (def) {
-            is Definition.ClassDef -> findInjectableConstructor(def.irClass)?.valueParameters
-            is Definition.DslDef -> findInjectableConstructor(def.irClass)?.valueParameters
-            is Definition.FunctionDef -> def.irFunction.valueParameters
-            is Definition.TopLevelFunctionDef -> def.irFunction.valueParameters
+            is Definition.ClassDef -> findInjectableConstructor(def.irClass)?.regularParameters
+            is Definition.DslDef -> findInjectableConstructor(def.irClass)?.regularParameters
+            is Definition.FunctionDef -> def.irFunction.regularParameters
+            is Definition.TopLevelFunctionDef -> def.irFunction.regularParameters
             else -> null
         } ?: return
 
@@ -264,7 +272,7 @@ class InjectedParamHintGenerator(
                 type = paramType,
                 isAssignable = false,
                 symbol = IrValueParameterSymbolImpl(),
-                index = index,
+                kind = IrParameterKind.Regular,
                 varargElementType = null,
                 isCrossinline = false,
                 isNoinline = false,
@@ -276,11 +284,13 @@ class InjectedParamHintGenerator(
 
         if (params.isEmpty()) return
 
-        function.valueParameters = params
+        function.parameters = params
         function.body = context.irFactory.createBlockBody(UNDEFINED_OFFSET, UNDEFINED_OFFSET, emptyList())
+        // Routed through the version adapter — the annotations list type is version-split
+        // in Kotlin 2.4.0 (List<IrAnnotation>).
         val deprecated = sharedDeprecated
         if (deprecated != null) {
-            function.annotations = listOf(deprecated)
+            KotlinAdapterLoader.current.setAnnotations(function, listOf(deprecated))
         } else {
             function.addDeprecatedHiddenAnnotation(context)
         }
@@ -310,12 +320,6 @@ class InjectedParamHintGenerator(
         // for the same target type don't produce identical class names at dex merge time.
         val modulePrefix = HintFilePrefix.of(firModuleData.name.asString())
         val fileName = "${modulePrefix}${KoinPluginConstants.INJECTED_PARAMS_HINT_PREFIX}${flat}.kt"
-        val firFile = buildFile {
-            moduleData = firModuleData
-            origin = FirDeclarationOrigin.Synthetic.PluginFile
-            packageDirective = buildPackageDirective { packageFqName = hintsPackage }
-            name = fileName
-        }
         // Anchor the synthetic hint file on a stable path from the current compile unit
         // (see issue #32). Priority: DSL registration site → target class source → sorted
         // first file in module. Mirrors [DslHintGenerator.generateDslDefinitionHints].
@@ -331,6 +335,16 @@ class InjectedParamHintGenerator(
             ?: moduleFragment.files.minByOrNull { it.fileEntry.name }?.fileEntry?.name
             ?: "/synthetic"
         val fakeNewPath = Path(basePath).parent.resolve(fileName)
+
+        val firFile = buildFile {
+            moduleData = firModuleData
+            origin = FirDeclarationOrigin.Synthetic.PluginFile
+            packageDirective = buildPackageDirective { packageFqName = hintsPackage }
+            name = fileName
+            // KLIB metadata serialization (Native/JS/Wasm) requires a resolvable io File
+            // per file; a null sourceFile fails the wasm/js serializer (KT-82395).
+            sourceFile = syntheticHintSourceFile(fakeNewPath.absolutePathString())
+        }
 
         val hintFile = IrFileImpl(
             fileEntry = NaiveSourceBasedFileEntryImpl(fakeNewPath.absolutePathString()),
@@ -362,7 +376,7 @@ class InjectedParamHintGenerator(
         )
         val hintFunc = symbols.firstOrNull()?.owner ?: return null
         val slots = mutableListOf<InjectedParamSlot>()
-        for (p in hintFunc.valueParameters) {
+        for (p in hintFunc.regularParameters) {
             val classifier = (p.type.classifierOrNull as? IrClassSymbol)?.owner
             val typeFqName = classifier?.fqNameWhenAvailable?.asString() ?: return null
             slots.add(
