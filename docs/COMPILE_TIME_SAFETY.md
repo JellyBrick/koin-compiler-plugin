@@ -35,39 +35,22 @@ class MyService(val repo: Repository)
 
 ## Validation Scopes
 
-Validation runs at multiple levels, each widening what is visible:
+**As of 1.1.0, there is exactly one validation pass: the full graph at a Koin entry point (A3),
+plus call-site validation (A4).** Earlier versions ran validation per-module too (A1: local +
+includes, A2: mutually-visible `@Configuration` siblings) — **both were removed in 1.1.0**. A
+module validated in isolation cannot know how it will be wired into a larger app; this stopped
+being theoretical when a real cross-module false positive was measured (a dependency genuinely
+provided by a peer module, with no Gradle edge between the two — see
+`docs/COMPILE_SAFETY_A3_PLAN.md`'s superseded-banner for the full account). `@Module(includes=…)`
+and `@Configuration` labels are now purely **module-discovery** mechanisms — they decide which
+modules get unioned into the one graph A3 validates, not a separate visibility tier with its own
+validation pass.
 
-### A1: Per-Module (local + includes)
-
-Each `@Module` is validated against its own definitions plus explicitly included modules.
-
-```kotlin
-@Module(includes = [DataModule::class])
-@ComponentScan("app")
-class AppModule
-// Validates: definitions from AppModule + DataModule
-```
-
-### A2: Configuration Group (same @Configuration label)
-
-Modules sharing a `@Configuration` label are loaded together at runtime. Their definitions are mutually visible during validation.
-
-```kotlin
-@Module @ComponentScan("core") @Configuration("prod")
-class CoreModule  // provides Repository
-
-@Module @ComponentScan("service") @Configuration("prod")
-class ServiceModule  // Service(repo: Repository) → OK, Repository visible from CoreModule
-```
-
-Different labels are isolated:
-```kotlin
-@Configuration("core")   // ← "core" label
-class CoreModule
-
-@Configuration("service") // ← "service" label — different, CoreModule NOT visible
-class ServiceModule       // Service(repo: Repository) → ERROR
-```
+**Trade-off:** a compilation unit with no Koin entry point of its own (a leaf library, most feature
+modules) gets **no compile-time safety diagnostics at all** — not even the isolated, false-positive-
+prone checking A1/A2 used to do. This is disclosed via an INFO-severity message, never silent. The
+whole graph is verified once, correctly, wherever `startKoin`/`koinApplication`/`@KoinApplication`
+actually assembles it.
 
 ### A3: startKoin Entry Point (full graph)
 
@@ -182,6 +165,9 @@ The whitelist is defined in `BindingRegistry.WHITELISTED_TYPES`.
 
 Both `@Provided` and the whitelist are checked before reporting a missing dependency. If either matches, the type is considered satisfied.
 
+`@Provided` is also the required declaration for dependencies that arrive through **runtime module
+loading** — see [Runtime Module Loading (`loadKoinModules`)](#runtime-module-loading-loadkoinmodules).
+
 ## Special Parameter Handling
 
 ### `Scope` Parameter Injection
@@ -265,6 +251,67 @@ Within the explicit list, declaration order is preserved:
 If a module re-appears in both the explicit list and is also discovered via `@Configuration`, it is loaded once — at its **explicit position** — so the user's declaration order always controls override precedence.
 
 **Escape hatch for fine-grained ordering**: list all participating modules explicitly in `@KoinApplication(modules = [...])` in the desired order. This bypasses classpath-dependent discovery order for `@Configuration` modules.
+
+## Runtime Module Loading (`loadKoinModules`)
+
+`loadKoinModules(...)` loads modules **after** `startKoin` — feature-scoped loading, dynamic
+delivery, plugin architectures, test setup. Graphs assembled this way cannot be verified at compile
+time, and the reason is fundamental rather than a gap in the implementation:
+
+- the call happens at an arbitrary runtime moment, so the plugin cannot prove a module is loaded
+  **before** a given `get<T>()` resolves against it;
+- the module may never be loaded at all on some code paths;
+- `unloadKoinModules(...)` can remove it again afterwards.
+
+The plugin therefore does not try to prove such a graph correct — it would have to invent knowledge
+it does not have. Instead:
+
+> **Dependencies that arrive via runtime module loading must be declared `@Provided`.**
+
+```kotlin
+// Arrives at runtime, not at startKoin
+@Provided
+class Repository
+
+val featureModule = module { single<Repository>() }    // loaded later
+
+val appModule = module { single<Service>() }           // Service(val repo: Repository)
+
+fun main() {
+    startKoin { modules(appModule) }
+    loadKoinModules(featureModule)                     // runtime load
+}
+```
+
+Without `@Provided`, `Repository` is reported missing — **correctly**, because at compile time it is
+genuinely absent from the assembled graph:
+
+| Diagnostic | Where |
+|---|---|
+| `KOIN-D001` | `Service`'s constructor dependency on `Repository` |
+| `KOIN-D002` / `KOIN-D003` | any `get<Repository>()` / `inject<Repository>()` call site |
+
+`@Provided` is the declaration of intent — *"this type arrives from outside the graph the compiler
+can see"* — the same mechanism used for platform types like `Context` (see
+[`@Provided`](#provided-annotation) above). Validation steps back, responsibility moves to you, and
+the graph is checked at runtime by Koin's `checkModules()`.
+
+**Scope it as narrowly as possible.** Prefer parameter-level `@Provided` on the specific injection
+point; class-level disables validation for *every* usage of that type:
+
+```kotlin
+class Service(@Provided val repo: Repository)   // only this parameter is skipped
+```
+
+**Known rough edge.** The runtime-loaded module itself is still reported as unreachable:
+
+```
+[KOIN-W001] Module 'featureModule' is not loaded at startKoin — 1 definitions unreachable: Repository
+  Add it to modules() or includes() to make these definitions available
+```
+
+That advice does not apply to this pattern — adding the module to `modules()` would defeat the point
+of loading it on demand. The warning is harmless unless you build with `allWarningsAsErrors`.
 
 ## Mixing `@KoinApplication` with DSL modules
 
@@ -353,7 +400,9 @@ Safety checks are gated by `KoinPluginLogger.compileSafetyEnabled`, controlled b
 
 ## Architecture Overview
 
-Validation runs across multiple IR phases. A1/A2 validation happens in Phase 1b, A3 in Phase 3/3.1, and A4 in Phase 3.5/3.6.
+Validation runs in two IR phases: A3 in Phase 3/3.1, A4 in Phase 3.5/3.6. Phase 1b **collects**
+definitions and generates module bodies only — it does not validate (A1/A2 per-module validation
+was removed in 1.1.0; see the Validation Scopes section above).
 
 ```
 IR Phase 0: KoinHintTransformer
@@ -366,9 +415,6 @@ IR Phase 1b: KoinAnnotationProcessor.generateModuleExtensions()
   ├── For each module:
   │   ├── collect local definitions
   │   ├── collect cross-module definitions (hints)
-  │   ├── A1: add definitions from includes
-  │   ├── A2: add definitions from @Configuration siblings
-  │   ├── BindingRegistry.validateModule()   ← A1/A2 validation
   │   └── generate module() function body
   └── expose: collectedModuleClasses, getDefinitionsForModule()
 
@@ -499,14 +545,10 @@ Supports: `@Named` (Koin, jakarta, javax), `@Qualifier` (Koin), and custom quali
 
 ### ConfigurationUtils (`ir/ConfigurationUtils.kt`)
 
-Shared utility for reading `@Configuration` labels from IR classes. Used by both A2 (in `KoinAnnotationProcessor`) and the `KoinStartTransformer` for configuration discovery.
-
-```kotlin
-fun extractConfigurationLabels(irClass: IrClass): List<String>
-// @Configuration("a", "b") → ["a", "b"]
-// @Configuration            → ["default"]
-// No annotation             → []
-```
+`hasConfigurationAnnotation(irClass: IrClass): Boolean` — checks whether a module class carries
+`@Configuration`, for module-discovery purposes (`KoinStartTransformer`). The label-extraction
+helper this doc used to show here (`extractConfigurationLabels`) was deleted in 1.1.0 along with
+the per-module A2 validation it only existed to feed.
 
 ### AnnotationModels (`ir/AnnotationModels.kt`)
 
@@ -530,27 +572,15 @@ sealed class Definition {
 - **DslDef** — collected during Phase 2 (`KoinDSLTransformer`) when DSL calls like `single<T>()` or `factory<T>()` are transformed. Participates in A3 (Phase 3/3.1) and A4 (Phase 3.5) validation as both provider and consumer.
 - **ExternalFunctionDef** — provider-only definition discovered from cross-module function hints. Represents a tagged top-level function (`@Singleton fun provide...()`) from another Gradle module. Only contributes to the provided types set; its own requirements were validated in its source module.
 
-## A2: Configuration Group Validation
+## `@Configuration` Label Discovery (module discovery, not a validation pass)
 
-In `KoinAnnotationProcessor.generateModuleExtensions()`, after collecting local definitions and includes:
-
-```kotlin
-// A2: If this module is @Configuration, include sibling modules from the same group
-val configLabels = extractConfigurationLabels(moduleClass.irClass)
-if (configLabels.isNotEmpty()) {
-    val siblingModuleNames = KoinConfigurationRegistry.getModuleClassNamesForLabels(configLabels)
-    for (siblingName in siblingModuleNames) {
-        val siblingModule = moduleClasses.find {
-            it.irClass.fqNameWhenAvailable?.asString() == siblingName
-        }
-        if (siblingModule != null && siblingModule != moduleClass) {
-            allVisibleDefinitions.addAll(collectAllDefinitions(siblingModule))
-        }
-    }
-}
-```
-
-`KoinConfigurationRegistry` is a System property-based registry populated during FIR phase. It maps labels to module FQ names, surviving the classloader boundary between FIR and IR.
+`@Configuration`-labeled modules are auto-discovered and unioned into the entry point's module set
+in `KoinStartTransformer` — this is the same mechanism that used to *also* expand per-module
+validation visibility (the deleted A2). `KoinConfigurationRegistry` is a System property-based
+registry populated during FIR phase, mapping labels to module FQ names across the FIR/IR classloader
+boundary; `KoinStartTransformer` reads it to assemble the full module list, which then goes through
+the single A3 full-graph validation below — there is no separate sibling-visibility validation step
+anymore.
 
 ## A3: startKoin Full-Graph Validation
 
@@ -598,8 +628,8 @@ In `testData/box/safety/`:
 | `list_ok.kt` | `List<T>` skips validation |
 | `qualifier_match.kt` | `@Named` qualifier matching works |
 | `scoped_visibility.kt` | Scope visibility rules |
-| `module_includes_visible.kt` | A1: included modules expand visibility |
-| `configuration_group.kt` | A2: `@Configuration` siblings share definitions |
+| `module_includes_visible.kt` | included modules' definitions are visible in the assembled graph |
+| `configuration_group.kt` | `@Configuration` siblings share definitions once unioned at an entry point |
 | `startkoin_full_graph.kt` | A3: `startKoin<T>` validates full graph |
 
 ### Diagnostic Tests (compilation error verification)
@@ -612,7 +642,7 @@ In `testData/diagnostics/`:
 | `lazy_missing.kt` | `Lazy<T>` with T missing → ERROR |
 | `qualifier_mismatch.kt` | Wrong qualifier → ERROR with hint |
 | `scoped_cross_scope.kt` | Cross-scope dependency → ERROR |
-| `configuration_label_mismatch.kt` | Different `@Configuration` labels → not visible → ERROR |
+| `configuration_label_mismatch.kt` | Different `@Configuration` labels, no entry point (leaf) → silent, no diagnostic (1.1.0) |
 | `startkoin_missing.kt` | A3: full graph still missing dep → ERROR |
 
 Each diagnostic test has `.fir.txt` (FIR golden file) and `.errors.txt` (error message golden file) for regression testing.
@@ -621,16 +651,48 @@ Each diagnostic test has `.fir.txt` (FIR golden file) and `.errors.txt` (error m
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| A1 | Per-module (local + includes) | Done |
-| A2 | `@Configuration` group siblings | Done |
-| A3 | `startKoin<T>` full graph | Done |
+| ~~A1~~ | ~~Per-module (local + includes)~~ | **Removed (1.1.0)** — see Validation Scopes above |
+| ~~A2~~ | ~~`@Configuration` group siblings~~ | **Removed (1.1.0)** — see Validation Scopes above |
+| A3 | `startKoin<T>` full graph — now the **sole** verifier | Done |
 | A4 | Call-site validation (`get<T>()`, `inject<T>()`, `koinViewModel<T>()`) | Done |
 | B | DSL calls (`single<T>()`, `factory<T>()`) in safety graph | Done |
 | C | Cross-Gradle-module (definitions from dependency JARs via hints) | Done |
 | C2 | Cross-module function hint metadata (qualifier, scope, bindings) | Done |
 | D | `@Property`/`@PropertyValue` matching | Done |
 
+**Phase B — supported DSL forms at a glance:**
+
+| DSL form | Requirement validation | Notes |
+|----------|------------------------|-------|
+| `single<T>()`, `factory<T>()`, `viewModel<T>()`, `worker<T>()`, `scoped<T>()` (primary-constructor form) | Full — structured requirement graph | Standard shape, covered since Phase B |
+| `create(::T)` inside `scope { }` / `scoped { }` | Full — the referenced function/constructor's own parameters are structured requirements | |
+| `singleOf(::T)`, `factoryOf(::T)`, `scopedOf(::T)`, `viewModelOf(::T)` (`org.koin.core.module.dsl`) | Full — same `IrFunctionReference` shape as `create(::T)` | Supports `named()`/`named<T>()` qualifiers |
+| Hand-written lambda body other than `create(::T)` (e.g. `single<T> { someExpression }`) | Partial — provider type and `.bind<Interface>()`/`binds(...)` targets tracked, but no structured requirement edges | See opaque-lambda note below |
+
 **Phase B notes:** DSL definitions (`single<T>()`, `factory<T>()`, etc.) are collected as `DslDef` during Phase 2 and participate in the safety graph. Phase 3.1 validates their constructor parameters when no `startKoin<T>()` / `@KoinApplication` is present. Phase 2.5 generates DSL definition hints (`dsl_single`, `dsl_factory`, etc.) for cross-module discovery.
+
+**Phase B — Koin's own constructor-shorthand DSL is requirement-validated too:** `singleOf`/
+`factoryOf`/`scopedOf`/`viewModelOf` (`org.koin.core.module.dsl`) resolve to one
+`IrFunctionReference` regardless of arity — the same shape `create(::T)` already resolves — so
+their requirements ARE derived from the referenced constructor/function's own parameters (see
+`KoinDSLTransformer.collectConstructorShorthandDef`), exactly like `single<T>()`/`create(::T)`.
+
+**Phase B — the one remaining opaque shape: a hand-written DSL lambda body other than
+`create(::T)`** (e.g. `single<T> { someExpression }`). The plugin never introspects or regenerates
+free-form lambda code, so it does not derive a structured requirement list for it — the provided
+type and any `.bind<Interface>()`/`binds(...)` targets are still fully tracked, but this
+definition contributes no edges to the requirement graph. This has one real, narrow consequence: a
+circular dependency running *through* such a definition (KOIN-D004) goes undetected, since cycle
+detection needs the structured graph. It does **not** mean the lambda's dependencies go unchecked:
+a literal `get<X>()`/`inject<X>()`/`getOrNull<X>()` call written inside it is still an ordinary
+Koin resolution call, tracked exactly like `by inject()` or `koinViewModel()` anywhere else in the
+codebase (Phase A4) — a genuinely missing dependency behind it is a hard `KOIN-D001`/`D002`/`D003`,
+not a silent gap. (`GeneratedResolutionCallRegistry` is what keeps this from also flagging the
+plugin's *own* generated `get()` calls inside annotation-derived/`single<T>()`-derived bodies as
+redundant call sites — see `KoinArgumentGenerator`/`KoinDSLTransformer.collectCallSiteIfResolutionFunction`.)
+If you need full structural validation *including* cycle detection, use `single<T>()`/`factory<T>()`/
+`create(::T)`/`singleOf(::T)` (optionally chained with `.bind<Interface>()`) instead of a
+hand-written lambda body.
 
 **Phase A4 notes:** Call sites are collected during Phase 2 and validated in Phase 3.5. Unresolved call sites in feature modules generate `callsite(required: T)` hint functions for deferred validation by the app module in Phase 3.6.
 

@@ -96,15 +96,18 @@ single<Service>()
 
 ### 2.3 Compile-Time Dependency Validation ✅
 Detect missing dependencies at compile time instead of runtime crashes.
-- [x] Per-module validation (A1): local definitions + explicit includes
+- [x] ~~Per-module validation (A1): local definitions + explicit includes~~ **Removed in 1.1.0** —
+  a module validated in isolation cannot know how it's wired into a larger app; superseded by A3
+  as the sole verifier (see `docs/COMPILE_TIME_SAFETY.md`, `docs/COMPILE_SAFETY_A3_PLAN.md`)
 - [x] Validate non-nullable parameters have definitions
 - [x] Validate `Lazy<T>` inner type is provided
 - [x] Validate `@Named`/`@Qualifier` qualifiers match (with hints for mismatches)
 - [x] Validate scoped dependencies are in correct scope
 - [x] Skip safe parameters: nullable, `@InjectedParam`, `@Property`, `List<T>`, defaults
 - [x] Clear error messages with module/parameter context
-- [x] Configuration group validation (A2): `@Configuration` sibling modules share definitions
-- [x] startKoin full-graph validation (A3): validates all modules assembled by `startKoin<T>()`
+- [x] ~~Configuration group validation (A2): `@Configuration` sibling modules share definitions~~
+  **Removed in 1.1.0** along with A1 — `@Configuration` is now purely a module-discovery signal for A3
+- [x] startKoin full-graph validation (A3): validates all modules assembled by `startKoin<T>()` — the **sole** compile-safety verifier as of 1.1.0
 - [x] Cross-Gradle-module validation (C): definitions from dependency JARs via hint functions
 - [x] `@Provided` annotation: marks types as externally available, skips safety validation
 - [x] Android framework whitelist: `Context`, `Activity`, `Application`, `Fragment`, `SavedStateHandle`, `WorkerParameters`
@@ -112,7 +115,8 @@ Detect missing dependencies at compile time instead of runtime crashes.
   - [x] Qualifier propagation: `@Named`/`@Qualifier` via `qualifier_<name>` or `qualifierType` hint params
   - [x] Scope propagation: `@Scope(MyScope::class)` via `scope` hint parameter
   - [x] Bindings propagation: return type supertypes via `binding0`, `binding1`, ... hint params
-- [x] DSL validation (B): validate `single<T>()`, `factory<T>()` in hand-written modules
+- [x] DSL validation (B): validate `single<T>()`, `factory<T>()`, `create(::T)`, and Koin's own
+  `singleOf`/`factoryOf`/`scopedOf`/`viewModelOf`/`new(::T)` constructor-reference DSL
 - [x] Call-site validation (A4): validates `get<T>()`, `inject<T>()`, `koinViewModel<T>()` call sites with deferred cross-module hints
 - [x] Cross-module custom qualifier discovery via qualifier hint functions
 - See [COMPILE_TIME_SAFETY.md](COMPILE_TIME_SAFETY.md) for detailed design and implementation
@@ -212,8 +216,11 @@ class ScopedService(val scope: Scope) {
 
 ---
 
-## Multi-Kotlin Version Compatibility (Deferred)
+## Multi-Kotlin Version Compatibility ✅
 
-**Current approach:** Follow latest Kotlin versions and adapt as needed. No complex versioning scheme required.
-
-**Background:** Kotlin compiler plugins are not binary compatible across minor versions. A plugin compiled with Kotlin 2.2.21 won't work with Kotlin 2.3.x. If needed in the future, version-aligned releases (`0.1.0-kotlin-2.2.21`) can be implemented.
+Kotlin compiler plugins bind to unstable compiler internals and aren't binary-compatible across
+minor versions by default. This is now solved via `koin-compiler-version-adapter`: one artifact
+spans a range of Kotlin minor lines (currently 2.3.20 → 2.4.20) through per-line adapter classes
+selected at plugin load (`KotlinAdapterLoader`), instead of shipping version-aligned release
+artifacts. See CLAUDE.md's "Compatibility — verified range + version gate" section for the
+version-gate policy (known-broken vs. any unverified version).

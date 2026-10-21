@@ -57,6 +57,7 @@ class CapturingMessageCollector(private val delegate: MessageCollector) : Messag
 
 fun TestConfigurationBuilder.configurePlugin() {
     useConfigurators(::ExtensionRegistrarConfigurator)
+    useDirectives(KoinTestDirectives)
     configureAnnotations()
 }
 
@@ -74,11 +75,12 @@ private class ExtensionRegistrarConfigurator(testServices: TestServices) : Envir
         // Disable aiAssist so golden `.errors.txt` files exercise diagnostic content only,
         // not the trailing CTA banner — the CTA has its own coverage in KoinDiagnosticTest.
         val publishHints = KoinTestDirectives.PUBLISH_HINTS_OFF !in module.directives
+        val compileSafety = KoinTestDirectives.DISABLE_COMPILE_SAFETY !in module.directives
         KoinPluginLogger.init(
             messageCollector,
             userLogs = true,
             debugLogs = true,
-            compileSafety = true,
+            compileSafety = compileSafety,
             publishHints = publishHints,
             aiAssist = false,
         )

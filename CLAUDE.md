@@ -2,13 +2,13 @@
 
 A native Kotlin Compiler Plugin for Koin dependency injection. Transforms `single<T>()` DSL calls and processes `@Singleton`/`@Factory` annotations at compile-time.
 
+Cross-agent essentials (build/test, change rules, Koin terminology) are in [AGENTS.md](AGENTS.md); this file holds the deeper contributor notes.
+
 ## Doctrine
 
 - **Evidence-based claims.** "fixed/verified/done" must cite file:line, test output, or a box-test run — never "looks right + tests pass".
 - **Falsify, don't confirm.** A box test must try to BREAK the transformation. Prove RED before GREEN: a regression test must fail on the unfixed code.
 - **Silent is worse than broken.** Dropping an annotation value, skipping a definition, or binding an unexpected type *without a diagnostic* is the worst failure class for a compiler plugin — when in doubt, emit an error/warning rather than degrade silently.
-- **Box tests do not assert compiler messages.** JvmBoxTest checks runtime `box()` plus IR goldens only; a KOIN-D00x reported through the MessageCollector fires invisibly there (box/safety/startkoin_full_graph hid a false KOIN-D001 this way for months). Any testData shape that can emit a diagnostic needs a `testData/diagnostics/` twin, whose `.errors.txt` golden is what actually pins the message.
-- **Golden updates race across runners.** `-Pupdate.testdata=true` on the FULL suite lets JvmDiagnosticTest and JvmErrorMessageTest rewrite the same `.kt` concurrently and can truncate it. Update goldens one runner at a time (`--tests "*JvmDiagnosticTestGenerated.testX"`, then the ErrorMessage twin), then re-run plain.
 
 > **SURPRISE RULE — mandatory.** If the project surprises you or contradicts these docs, STOP, tell the user, and record it here. "Surprising" = not inferable from the code in one grep.
 
@@ -76,6 +76,11 @@ koin-compiler-plugin/
 | `create(::T)` | `Scope` | Create instance in scope |
 | `module<T>()` | `KoinApplication` | Load a single `@Module` class |
 | `modules(vararg KClass)` | `KoinApplication` | Load multiple `@Module` classes |
+| `singleOf(::T)` | `Module` | Singleton via constructor/function reference (Constructor DSL, `org.koin.core.module.dsl`) |
+| `factoryOf(::T)` | `Module` | Factory via constructor/function reference |
+| `scopedOf(::T)` | `ScopeDSL` | Scoped via constructor/function reference |
+| `viewModelOf(::T)` | `Module` | ViewModel via constructor/function reference |
+| `new(::T)` | `Scope` | Create instance in scope via function reference (`org.koin.core.module.dsl`); real Koin runtime function, left untransformed — only requirement validation applies |
 
 ## Annotations
 
@@ -124,7 +129,7 @@ fun provideHttpClient(): NetworkClient = OkHttpClient()
 | `@InjectedParam` | Uses `ParametersHolder.get()` |
 | `@Property("key")` | Injects property value (warns if no `@PropertyValue` default) |
 | `@PropertyValue("key")` | Provides default value for `@Property` |
-| `@Provided` | Marks type/parameter as externally available (skips safety validation) |
+| `@Provided` | Marks type/parameter as externally available (skips safety validation). **Required for dependencies that arrive via `loadKoinModules(...)`** — compile time cannot prove a runtime-loaded module is loaded before a given resolution, so the plugin does not try; see [docs/COMPILE_TIME_SAFETY.md](docs/COMPILE_TIME_SAFETY.md#runtime-module-loading-loadkoinmodules) |
 | `@ScopeId(name = "x")` | Resolves from named scope → `getScope("x").get<T>()` |
 | `@ScopeId(MyScope::class)` | Resolves from typed scope → `getScope("fqName").get<T>()` |
 
@@ -178,8 +183,10 @@ Before opening (or approving) any PR, both guards must pass:
 - **Codegen changes: JVM-green is not done.** Duplicate-signature and KLIB errors are invisible on JVM — compile `test-apps` for at least `iosArm64` (or another native target) and `wasmJs` before declaring a codegen change complete.
 
 ### 3. Compile-safety stress test — run for EVERY published version
-- Comment out (or delete) a used definition in `playground-apps/app-annotations` **and** `app-dsl`, recompile, and confirm the build **fails with `KOIN-D001`** (not a silent success → runtime crash). Full procedure + expected results: [`playground-apps/README.md`](playground-apps/README.md#compile-safety-stress-test-run-for-every-plugin-version).
-- **DSL: clean the edited module first** (`./gradlew :core:data:clean :app:compileDebugKotlin`). Incremental-only DSL rebuilds give a **false green** — removing a DSL definition leaves an orphaned generated hint class (`org/koin/plugin/hints/…Dsl_singleKt.class`) that IC never deletes, so the deleted provider still looks present. A run without the clean step is not a valid result. (Annotations are caught at the owning module's own compile and need no clean.) Known IC limitation, tracked for KCP 1.1.
+- Run the full numbered checklist (scenarios 0–4: baseline, removed definition, transitive-includes edge, module dropped from root's list, fully-emptied module) against **both** `playground-apps/app-annotations` and `app-dsl`. Full procedure, exact file:line targets, and expected diagnostics: [`playground-apps/README.md`](playground-apps/README.md#compile-safety-stress-test-run-for-every-plugin-version).
+- **Scenario 1 — `app-annotations` needs `--rerun-tasks`, `app-dsl` doesn't (found 2026-08-28, 1.2.0-Beta7, daemon-isolated — real, not a shared-daemon artifact).** Removing `@Singleton` from a class on `app-annotations` (class kept, rest of the module unchanged) can pass a *plain* `./gradlew :app:compileDebugKotlin` silently: the owning module correctly regenerates its `@ComponentScan` hint in the same build (verified: definition count in the hint drops), but `:app`'s own compile task — which also re-executes, this is not a Gradle up-to-date skip — validates against a stale view of it. `--rerun-tasks` (discards Kotlin's own IC cache, not just Gradle's) reliably catches it. Narrow, not systemic: scenarios 2 and 3 on the same app caught their breaks on the first plain build, no rerun needed. Not fixed. Full detail: checklist scenario 1 in the README link above.
+- **No clean/rerun needed for DSL removed-definition detection (as of 1.1.0-Beta3).** Incremental DSL rebuilds detect a removed definition on a plain build — `./gradlew :app:compileDebugKotlin` on `app-dsl` MUST fail with `KOIN-D001`. The old DSL orphan-hint false-green (removing a `single<T>()` left an orphaned per-def hint class `…Dsl_singleKt.class` that IC never deleted) is fixed: each module's DSL hints are batched into one `koin_dsl_hints_<module>.kt` regenerated wholesale (same shape the annotation hints always used), so a removed def leaves no orphan.
+- **Known limitation — a module that goes COMPLETELY empty** (loses its last `includes()` AND has no definitions): confirmed **still true for `app-dsl`** (2026-08-28, 1.2.0-Beta7) — plain incremental `compileDebugKotlin` passes silently, only a full clean + `--no-build-cache` catches it (the emitted artifact is correct; the residual is K2 re-resolving a changed hint signature inside one IC session). Confirmed **no longer reproducing for `app-annotations`** in the same verification pass — a plain incremental build caught it with no clean needed, contradicting this bullet's previous unconditional claim. Root cause not deliberately investigated; plausibly an incidental side effect of hint-batching/multi-hop `@Configuration` work already on this branch. **Treat the annotation-path fix as observed, not guaranteed — re-verify on both apps before relying on it for a release.** Full procedure + rationale: checklist scenario 4 in the README link above.
 
 ## Release
 
@@ -190,6 +197,8 @@ Before opening (or approving) any PR, both guards must pass:
 # Release to Gradle Plugin Portal
 ./release-to-gradle-portal.sh
 ```
+
+**Release notes — concise, written for Koin users.** Target ~300 words (1.2.0/1.2.1 were rewritten from ~1300 to ~350 on 2026-09-10). One opening sentence saying what the release is for, then Added / Fixed / Changed / Compatibility / Install. Each bullet states what a user sees (the diagnostic, the crash, the false positive) and the fix, never the internal mechanism (hint carriers, relays, adapters, builder APIs). Keep contributor credits and issue links. Behavior changes still get their own explicit entry.
 
 **Release notes — Added vs Fixed:** ask *"would this affect a user on the previous supported Kotlin/Koin range?"* Yes → `Fixed`. No (only enables a new version range) → ONE umbrella `Added` entry with sub-bullets. Intentional generated-code behavior changes always get their own explicit entry.
 
@@ -203,13 +212,35 @@ koinCompiler {
     unsafeDslChecks = true    // Validates create() is the only instruction in lambda (default: true)
     skipDefaultValues = true  // Skip injection for parameters with default values (default: true)
     compileSafety = true       // Compile-time dependency validation (default: true)
-    strictSafety = true        // Force safety pass to bypass Kotlin IC on this module (default: auto-detect)
+    strictSafety = true        // Force safety pass to bypass Kotlin IC on this module (default: auto-detect; `false` is ignored once an entry point is detected)
+    strictSafetyForceOff = true // Escape hatch: confirms a detected entry point is a misfire, actually disables strictSafety (default: false)
+    logSeverity = "warning"           // Severity of informational output (default: "warning"; set "info" under allWarningsAsErrors)
+    versionCheckSeverity = "warning"  // Severity of the Kotlin-version-compatibility warning (default: "warning"; independent of logSeverity)
 }
 ```
 
+### Informational output severity (`allWarningsAsErrors` compatibility, #73)
+
+`userLogs`/`debugLogs` messages and `@Monitor` tracing-enabled summaries are emitted at WARNING
+severity by default, which fails a build compiled with Gradle's `allWarningsAsErrors` (`-Werror`)
+even though this output is purely informational. Set `logSeverity = "info"` to downgrade it —
+`INFO` is not treated as a build-failing warning under `-Werror`.
+
+The Kotlin-version-compatibility check ("you're on an unverified Kotlin version") has its own,
+**separate** `versionCheckSeverity` setting — deliberately not tied to `logSeverity`, since muting
+informational plugin noise shouldn't also hide a real compiler-compatibility risk. Set it to
+`"info"` only if you've already assessed that risk and it's blocking your `-Werror` build.
+
+Neither setting affects real diagnostics (`KOIN-Dxxx`/`KOIN-Wxxx`/etc.) — those always report at
+their own severity (see [docs/COMPILE_TIME_SAFETY.md](docs/COMPILE_TIME_SAFETY.md)).
+
 ### Strict Safety (incremental compilation bypass)
 
-**Auto-enabled by default** on modules that contain `startKoin`, `koinApplication`, or `@KoinApplication`. The Gradle plugin scans source files at configuration time, detects the aggregator, and emits a one-line lifecycle log so the decision is visible. Set `strictSafety = true` or `false` in `koinCompiler { }` to override the auto-detection.
+**Auto-enabled by default** on modules that contain `startKoin`, `koinApplication`, or `@KoinApplication`. The Gradle plugin scans source files at configuration time, detects the aggregator, and emits a one-line lifecycle log so the decision is visible.
+
+**Mandatory once detected (1.1.0+).** `strictSafety = false` no longer silently wins on a module where detection fires — the plugin ignores it, forces the safety pass on anyway, and logs a warning explaining why. Full-graph validation no longer has a redundant per-module safety net once A2 stops verifying (see [docs/COMPILE_TIME_SAFETY.md](docs/COMPILE_TIME_SAFETY.md)), so an aggregator silently skipping re-validation on an incremental rebuild is a correctness gap, not a preference. `strictSafety = true` still works everywhere (forces it on regardless of detection).
+
+**Escape hatch for a genuine detector misfire**: if the `startKoin`/`koinApplication`/`@KoinApplication` marker only appears in a comment or string literal (not a real entry point), set `strictSafetyForceOff = true` — a separate, explicit acknowledgement from a plain `strictSafety = false`, since the two cases ("this isn't really an aggregator" vs. "I just don't want the cost") are otherwise indistinguishable from the Gradle side.
 
 **Why**: full-graph safety only runs in the aggregator's `compileKotlin`, and Kotlin's IC — today, in K2 with the Build Tools API path that AGP uses — doesn't give the aggregator a reason to re-run when the graph actually changed. Two places where IC's tracking is too coarse for a DI graph:
 
@@ -228,7 +259,7 @@ We already record file-pair links via `ExpectActualTracker` to plug some of this
 | DSL (`startKoin { modules(...) }`, `koinApplication { … }`) | `startKoin` / `koinApplication` string in source |
 | Annotation (`@KoinApplication`) | `@KoinApplication` string in source |
 
-When the auto-detection misfires (e.g. test fixtures referencing `startKoin` in comments, or a non-aggregator helper file with the marker), set `strictSafety = false` explicitly to opt out.
+When the auto-detection misfires (e.g. test fixtures referencing `startKoin` in comments, or a non-aggregator helper file with the marker), set `strictSafetyForceOff = true` explicitly to opt out — plain `strictSafety = false` alone is ignored once detection fires (see above).
 
 Has no effect when `compileSafety = false`. See: https://github.com/InsertKoinIO/koin-compiler-plugin/issues/32
 
@@ -278,16 +309,13 @@ Set `skipDefaultValues = false` to always inject all parameters from the DI cont
 ## Compatibility — verified range + version gate
 
 - **Koin**: 4.2.0+
-- **Kotlin**: K2 compiler required. One artifact spans **Kotlin 2.3.20 → 2.4.x** via the
-  version-adapter layer (`koin-compiler-version-adapter/`): the plugin core compiles against the
-  2.3.20 floor, and version-split operations (FIR registration, IR annotation-list assignment,
-  deprecations refresh) route through the adapter matching the running compiler.
-  **Verified: 2.3.20, 2.4.0, 2.4.10** (2.4.10 = 2.4-line ABI, checked with `tools/abi-check` and an
-  end-to-end sample compile+run; declared in `kotlin-version-adapters.properties`).
+- **Kotlin**: K2 compiler required. One artifact spans **Kotlin 2.3.20 → 2.4.20** via `koin-compiler-version-adapter` (per-line adapter classes, selected at plugin load — see `KotlinAdapterLoader`). Verified versions live in `supported-kotlin-versions.txt` and the adapter registry, which are the same list.
 
 **Version-gate policy** (the plugin binds to unstable compiler internals — every Kotlin minor is a potential break):
 
-- **Kotlin older than the adapter floor (2.3.20)** → fail fast with a clear diagnostic naming the version and the supported list (KotlinAdapterLoader error path) — never let a raw `ClassCastException`/`NoSuchMethodError` surface as the error.
-- **Unknown future version** (above the newest declared adapter line) → STRONG_WARNING + proceed with the newest adapter, never hard-block.
-- After verifying a new Kotlin patch release (abi-check green + sample app), declare it in `koin-compiler-version-adapter/resources/META-INF/koin/kotlin-version-adapters.properties` and `supported-kotlin-versions.txt` to silence the newer-than-tested warning.
-- Keep the verified range in this section AND the README in sync on every release.
+- **Known-broken Kotlin version** (below the registered floor) → fail fast with a clear diagnostic naming the version, the supported range, and the tracking issue — never let a raw `ClassCastException`/`NoSuchMethodError` surface as the error.
+- **Any version that is not a verified entry** (a future minor line like 2.5.0, or an unverified patch inside a registered line) → WARN + proceed with the highest adapter at or below it, never hard-block.
+- **A new patch within an already-registered minor line is NOT trusted** (changed in 1.2.1). Trust is per exact `major.minor.patch`: a version reuses an adapter *class* by line, but only counts as verified when it has its own registry entry, earned by a green `tools/abi-check/check-kotlin-abi.sh <version>`. Anything else warns.
+  **Why**: 1.2.0 relaxed this to `major.minor` on the strength of 2.4.10, and Kotlin 2.4.20 falsified it three weeks later — 4 removed/re-signed compiler APIs, a raw `NoSuchMethodError` from `DslHintGenerator`, and the relax had silenced the only warning that would have hinted at it (GH #89, #99). Kotlin ships **feature releases in the `.20` patch slot**; this plugin's own floor, 2.3.20, is an x.y.20. `major.minor` is not a safe trust unit.
+  A new version needing no adapter change just points at the existing class (2.4.10 and 2.4.20 both map to `Kotlin240Adapter`) — a registry line, not a new module. `check-kotlin-abi.sh` verifies the core **and** the adapter class that version selects.
+- Keep `supported-kotlin-versions.txt`, the adapter registry, and the README in sync on every release.

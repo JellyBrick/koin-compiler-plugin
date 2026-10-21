@@ -3,19 +3,17 @@ package org.jetbrains.kotlin.compiler.plugin.template.services
 import org.jetbrains.kotlin.test.directives.model.SimpleDirectivesContainer
 
 /**
- * Custom testData directives for Koin plugin behavior flags.
- *
- * Registered by [ExtensionRegistrarConfigurator] so testData files can toggle
- * per-compilation plugin options that Gradle users set via the `koinCompiler {}` block.
+ * Per-test overrides for `koinCompiler { }` options that [ExtensionRegistrarConfigurator]
+ * otherwise hardcodes for every test. Add a new directive here (and thread it through the
+ * configurator) when a test needs to flip an option away from its hardcoded default.
  */
 object KoinTestDirectives : SimpleDirectivesContainer() {
-    /**
-     * Run the compilation with `publishHints = false` (the `koinCompiler { publishHints = false }`
-     * Gradle setting). No hint callables are generated in FIR, so hint-driven discovery
-     * (configuration siblings, provider-hint oracle, DSL and demand hints) sees nothing from
-     * this compilation. Reproduces consumer projects that opt out of hint publication.
-     */
     val PUBLISH_HINTS_OFF by directive(
         description = "Compile with the Koin plugin option publishHints=false"
+    )
+
+    /** Mirrors `koinCompiler { compileSafety = false }` for the test module it's declared on. */
+    val DISABLE_COMPILE_SAFETY by directive(
+        description = "Disable compile-safety hint generation/validation for this test module"
     )
 }

@@ -21,6 +21,7 @@ import org.jetbrains.kotlin.name.CallableId
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
+import org.koin.compiler.plugin.GeneratedResolutionCallRegistry
 import org.koin.compiler.plugin.KoinAnnotationFqNames
 import org.koin.compiler.plugin.KoinPluginLogger
 import org.koin.compiler.plugin.PropertyValueRegistry
@@ -204,6 +205,7 @@ class KoinArgumentGenerator(
             if (getPropertyWithDefaultFunction != null) {
                 KoinPluginLogger.debug { "  Using getProperty(\"$propertyKey\", ${defaultProperty.name}) with @PropertyValue default" }
                 return builder.irCall(getPropertyWithDefaultFunction.symbol).apply {
+                    GeneratedResolutionCallRegistry.markGenerated(this)
                     dispatchReceiver = scopeReceiver
                     putRegularArgument(0, builder.irString(propertyKey))
                     // Reference the default property's getter
@@ -235,6 +237,7 @@ class KoinArgumentGenerator(
 
         if (getPropertyFunction != null) {
             return builder.irCall(getPropertyFunction.symbol).apply {
+                GeneratedResolutionCallRegistry.markGenerated(this)
                 dispatchReceiver = scopeReceiver
                 putRegularArgument(0, builder.irString(propertyKey))
             }
@@ -247,6 +250,7 @@ class KoinArgumentGenerator(
 
         if (koinPropertyFunction != null) {
             return builder.irCall(koinPropertyFunction.symbol).apply {
+                GeneratedResolutionCallRegistry.markGenerated(this)
                 if (koinPropertyFunction.dispatchReceiverParameter != null) {
                     dispatchReceiver = scopeReceiver
                 } else if (koinPropertyFunction.extensionReceiverParam != null) {
@@ -289,6 +293,7 @@ class KoinArgumentGenerator(
 
         if (getPropertyOrNullFunction != null) {
             return builder.irCall(getPropertyOrNullFunction.symbol).apply {
+                GeneratedResolutionCallRegistry.markGenerated(this)
                 dispatchReceiver = scopeReceiver
                 putRegularArgument(0, builder.irString(propertyKey))
             }
@@ -301,6 +306,7 @@ class KoinArgumentGenerator(
 
         if (koinPropertyOrNullFunction != null) {
             return builder.irCall(koinPropertyOrNullFunction.symbol).apply {
+                GeneratedResolutionCallRegistry.markGenerated(this)
                 if (koinPropertyOrNullFunction.dispatchReceiverParameter != null) {
                     dispatchReceiver = scopeReceiver
                 } else if (koinPropertyOrNullFunction.extensionReceiverParam != null) {
@@ -381,6 +387,7 @@ class KoinArgumentGenerator(
         if (getAllFunction != null) {
             val callReturnType = returnType ?: getAllFunction.returnType
             return builder.irCall(getAllFunction.symbol, callReturnType).apply {
+                GeneratedResolutionCallRegistry.markGenerated(this)
                 dispatchReceiver = scopeReceiver
                 putTypeArgumentCompat(0, elementType)
             }
@@ -419,6 +426,7 @@ class KoinArgumentGenerator(
         }
 
         return builder.irCall(getFunction.symbol, type).apply {
+            GeneratedResolutionCallRegistry.markGenerated(this)
             dispatchReceiver = scopeReceiver
             putTypeArgumentCompat(0, type)
 
@@ -461,6 +469,7 @@ class KoinArgumentGenerator(
         }
 
         return builder.irCall(getOrNullFunction.symbol, type.makeNullable()).apply {
+            GeneratedResolutionCallRegistry.markGenerated(this)
             dispatchReceiver = scopeReceiver
             putTypeArgumentCompat(0, type)
 
@@ -509,6 +518,7 @@ class KoinArgumentGenerator(
 
         val callReturnType = returnType ?: injectFunction.returnType
         return builder.irCall(injectFunction.symbol, callReturnType).apply {
+            GeneratedResolutionCallRegistry.markGenerated(this)
             dispatchReceiver = scopeReceiver
             putTypeArgumentCompat(0, type)
 
@@ -561,6 +571,7 @@ class KoinArgumentGenerator(
         }
 
         return builder.irCall(getFunction.symbol, type).apply {
+            GeneratedResolutionCallRegistry.markGenerated(this)
             dispatchReceiver = parametersHolderReceiver
             putTypeArgumentCompat(0, type)
         }
@@ -592,6 +603,7 @@ class KoinArgumentGenerator(
         }
 
         return builder.irCall(getOrNullFunction.symbol, type.makeNullable()).apply {
+            GeneratedResolutionCallRegistry.markGenerated(this)
             dispatchReceiver = parametersHolderReceiver
             putTypeArgumentCompat(0, type)
         }

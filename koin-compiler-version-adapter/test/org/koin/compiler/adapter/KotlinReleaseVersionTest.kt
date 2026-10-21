@@ -61,33 +61,28 @@ class KotlinReleaseVersionTest {
     }
 
     @Test
-    fun patchReleaseSelectsSameLineAdapter() {
-        // 2.4.10 (first 2.4 patch release) sits above the 2.4.0 registry entry and below
-        // nothing else — selection must resolve to the 2.4 adapter, not warn as unknown.
-        assertTrue(v("2.4.10").lineAtLeast(v("2.4.0")))
-        assertTrue(v("2.4.10").lineAtLeast(v("2.3.20")))
-        assertFalse(v("2.4.0").lineAtLeast(v("2.4.10")))
+    fun sameReleaseRequiresTheExactPatch() {
+        // The trust comparison: a patch bump is NOT the same release. 2.4.20 removed four
+        // compiler APIs the core binds while 2.4.10 removed none, so `major.minor` cannot
+        // stand in for a verified version (GH #89, #99).
+        assertTrue(v("2.4.0").sameRelease(v("2.4.0")))
+        assertFalse(v("2.4.10").sameRelease(v("2.4.0")))
+        assertFalse(v("2.4.20").sameRelease(v("2.4.0")))
+        assertFalse(v("2.4.20").sameRelease(v("2.4.10")))
     }
 
     @Test
-    fun registryDeclaresKotlin2410OnK240Adapter() {
-        // Selection math over the REAL registry resource (no adapter classloading — that part
-        // is exercised end-to-end by the main plugin's box tests): a 2.4.10 compiler must
-        // resolve to the k240 adapter entry, and because 2.4.10 is declared in the registry it
-        // is the newest entry — so the "newer than the newest tested version" warning cannot fire.
-        val resource = KotlinAdapterLoader::class.java.classLoader
-            .getResourceAsStream("META-INF/koin/kotlin-version-adapters.properties")
-            ?: error("adapter registry resource missing")
-        val properties = java.util.Properties().apply { resource.use { load(it) } }
-        val registry = properties.entries
-            .mapNotNull { (key, value) -> KotlinReleaseVersion.parseOrNull(key.toString())?.let { it to value.toString() } }
-            .sortedBy { it.first }
+    fun sameReleaseDistinguishesMinorAndMajor() {
+        assertFalse(v("2.5.0").sameRelease(v("2.4.0")))
+        assertFalse(v("1.9.20").sameRelease(v("2.4.0")))
+        assertFalse(v("3.0.0").sameRelease(v("2.4.0")))
+    }
 
-        val current = v("2.4.10")
-        val selected = registry.lastOrNull { current.lineAtLeast(it.first) }
-            ?: error("no adapter entry selected for 2.4.10")
-        assertEquals("org.koin.compiler.adapter.k240.Kotlin240Adapter", selected.second)
-        val newest = registry.last()
-        assertTrue(newest.first.lineAtLeast(current), "2.4.10 must be within the tested range (no newer-than-tested warning)")
+    @Test
+    fun sameReleaseIgnoresMaturity() {
+        // A pre-release carries its own release's ABI — same stance as lineAtLeast.
+        assertTrue(v("2.4.0-Beta1").sameRelease(v("2.4.0")))
+        assertTrue(v("2.4.20-dev-835").sameRelease(v("2.4.20")))
+        assertFalse(v("2.4.20-dev-835").sameRelease(v("2.4.0")))
     }
 }

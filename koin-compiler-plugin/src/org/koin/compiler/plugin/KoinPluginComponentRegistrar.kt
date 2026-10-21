@@ -27,6 +27,24 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * FIR extensions don't receive configuration directly, so we store it globally.
  */
+/**
+ * Severity for the Koin plugin's own informational/compatibility output — distinct from
+ * [KoinDiagnostic.Severity], which governs real, actionable diagnostics (KOIN-Dxxx/Wxxx/etc.)
+ * and is never affected by this setting.
+ *
+ * WARNING preserves today's behavior (visible in default Gradle output). INFO is safe under
+ * `allWarningsAsErrors` / `-Werror` — confirmed via `CompilerMessageSeverity.isRegularWarning()`,
+ * which only treats WARNING and STRONG_WARNING as build-failing under that flag.
+ */
+enum class KoinLogSeverity {
+    WARNING, INFO;
+
+    companion object {
+        fun parse(raw: String?): KoinLogSeverity =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: WARNING
+    }
+}
+
 object KoinPluginLogger {
     /**
      * Per-compilation message collector storage.
@@ -77,6 +95,8 @@ object KoinPluginLogger {
         val aiAssist: Boolean = false,
         val moduleId: String? = null,
         val lookupTracker: LookupTracker? = null,
+        val logSeverity: KoinLogSeverity = KoinLogSeverity.WARNING,
+        val versionCheckSeverity: KoinLogSeverity = KoinLogSeverity.WARNING,
     )
 
     private val threadFlags: InheritableThreadLocal<Flags?> = InheritableThreadLocal()
@@ -94,6 +114,24 @@ object KoinPluginLogger {
     val compileSafetyEnabled: Boolean get() = effectiveFlags.compileSafety
     val publishHintsEnabled: Boolean get() = effectiveFlags.publishHints
     val aiAssistEnabled: Boolean get() = effectiveFlags.aiAssist
+
+    /**
+     * Compiler severity to use for [user]/[debug]/[userFir]/[debugFir]/[warn] — the plugin's
+     * "here's what I'm doing" output, as opposed to real diagnostics ([report]) or the
+     * Kotlin-version compatibility check ([effectiveVersionCheckCompilerSeverity]), which have
+     * their own, separate severity setting.
+     */
+    @PublishedApi
+    internal val effectiveLogCompilerSeverity: CompilerMessageSeverity
+        get() = if (effectiveFlags.logSeverity == KoinLogSeverity.INFO) CompilerMessageSeverity.INFO else CompilerMessageSeverity.WARNING
+
+    /**
+     * Compiler severity for the Kotlin-version-compatibility gate. Deliberately a separate
+     * setting from [effectiveLogCompilerSeverity]: a user muting informational plugin noise
+     * should not also lose visibility into "you're on an unverified Kotlin version."
+     */
+    val effectiveVersionCheckCompilerSeverity: CompilerMessageSeverity
+        get() = if (effectiveFlags.versionCheckSeverity == KoinLogSeverity.INFO) CompilerMessageSeverity.INFO else CompilerMessageSeverity.STRONG_WARNING
 
     /**
      * Gradle-module-unique identifier (typically `project.path`, e.g. `:featureA:ui`) used as the
@@ -183,6 +221,8 @@ object KoinPluginLogger {
         aiAssist: Boolean = true,
         moduleId: String? = null,
         lookupTracker: LookupTracker? = null,
+        logSeverity: KoinLogSeverity = KoinLogSeverity.WARNING,
+        versionCheckSeverity: KoinLogSeverity = KoinLogSeverity.WARNING,
     ) {
         threadCollector.set(collector)
         fallbackCollector = collector
@@ -196,6 +236,8 @@ object KoinPluginLogger {
             aiAssist = aiAssist,
             moduleId = moduleId?.takeIf { it.isNotBlank() },
             lookupTracker = lookupTracker,
+            logSeverity = logSeverity,
+            versionCheckSeverity = versionCheckSeverity,
         )
         threadFlags.set(flags)
         fallbackFlags = flags
@@ -214,7 +256,7 @@ object KoinPluginLogger {
      */
     inline fun user(message: () -> String) {
         if (userLogsEnabled) {
-            effectiveCollector.report(CompilerMessageSeverity.WARNING, "[Koin] ${message()}")
+            effectiveCollector.report(effectiveLogCompilerSeverity, "[Koin] ${message()}")
         }
     }
 
@@ -229,16 +271,20 @@ object KoinPluginLogger {
      */
     inline fun debug(message: () -> String) {
         if (debugLogsEnabled) {
-            effectiveCollector.report(CompilerMessageSeverity.WARNING, "[Koin-Debug] ${message()}")
+            effectiveCollector.report(effectiveLogCompilerSeverity, "[Koin-Debug] ${message()}")
         }
     }
 
     /**
-     * Log a warning that is always emitted regardless of userLogs/debugLogs settings.
-     * Use for critical messages that should never be silenced (e.g., @Monitor without SDK).
+     * Log a message that is always emitted regardless of userLogs/debugLogs settings.
+     *
+     * Despite the name, this is NOT "never-silenceable, critical" material — its only current
+     * caller ([org.koin.compiler.plugin.ir.KoinMonitorTransformer.logSummary]) is a "@Monitor
+     * tracing enabled" feature-status summary, the same class of output as [user]. It obeys the
+     * same severity setting so it doesn't reintroduce #73 on its own.
      */
     fun warn(message: String) {
-        effectiveCollector.report(CompilerMessageSeverity.WARNING, "[Koin] $message")
+        effectiveCollector.report(effectiveLogCompilerSeverity, "[Koin] $message")
     }
 
     /**
@@ -249,7 +295,7 @@ object KoinPluginLogger {
      */
     inline fun userFir(message: () -> String) {
         if (userLogsEnabled) {
-            effectiveCollector.report(CompilerMessageSeverity.WARNING, "[Koin-FIR] ${message()}")
+            effectiveCollector.report(effectiveLogCompilerSeverity, "[Koin-FIR] ${message()}")
         }
     }
 
@@ -261,7 +307,7 @@ object KoinPluginLogger {
      */
     inline fun debugFir(message: () -> String) {
         if (debugLogsEnabled) {
-            effectiveCollector.report(CompilerMessageSeverity.WARNING, "[Koin-Debug-FIR] ${message()}")
+            effectiveCollector.report(effectiveLogCompilerSeverity, "[Koin-Debug-FIR] ${message()}")
         }
     }
 
@@ -359,6 +405,8 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
         val publishHints = configuration.get(KoinConfigurationKeys.PUBLISH_HINTS, true)
         val aiAssist = configuration.get(KoinConfigurationKeys.AI_ASSIST, true)
         val moduleId = configuration.get(KoinConfigurationKeys.MODULE_ID)
+        val logSeverity = KoinLogSeverity.parse(configuration.get(KoinConfigurationKeys.LOG_SEVERITY))
+        val versionCheckSeverity = KoinLogSeverity.parse(configuration.get(KoinConfigurationKeys.VERSION_CHECK_SEVERITY))
 
         // IC trackers for incremental compilation support
         val lookupTracker = configuration.get(CommonConfigurationKeys.LOOKUP_TRACKER)
@@ -375,19 +423,20 @@ class KoinPluginComponentRegistrar: CompilerPluginRegistrar() {
             aiAssist,
             moduleId,
             lookupTracker,
+            logSeverity,
+            versionCheckSeverity,
         )
         val expectActualTracker = configuration.get(
             CommonConfigurationKeys.EXPECT_ACTUAL_TRACKER,
             ExpectActualTracker.DoNothing
         )
-        KoinPluginLogger.debug { "IC trackers: lookupTracker=${lookupTracker?.javaClass?.simpleName ?: "NULL"}, expectActualTracker=${expectActualTracker.javaClass.simpleName}" }
 
         // Extension registration binds to compiler internals whose binary contract
         // moves across Kotlin versions — route it through the version adapter
         // matching the running compiler (see koin-compiler-version-adapter/).
         val selection = KotlinAdapterLoader.load()
         selection.warnings.forEach {
-            messageCollector.report(CompilerMessageSeverity.STRONG_WARNING, it)
+            messageCollector.report(KoinPluginLogger.effectiveVersionCheckCompilerSeverity, it)
         }
         val adapter = selection.adapter ?: run {
             messageCollector.report(CompilerMessageSeverity.ERROR, selection.error ?: "Koin compiler plugin: no compatible Kotlin version adapter")

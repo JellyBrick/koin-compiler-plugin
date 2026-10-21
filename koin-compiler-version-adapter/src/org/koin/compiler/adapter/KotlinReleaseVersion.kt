@@ -25,13 +25,22 @@ data class KotlinReleaseVersion(
     override fun compareTo(other: KotlinReleaseVersion): Int =
         compareValuesBy(this, other, { it.major }, { it.minor }, { it.patch }, { it.maturity })
 
-    /** Same numeric line regardless of maturity (2.4.0-Beta1 ~ 2.4.0). */
-    fun sameLineAs(other: KotlinReleaseVersion): Boolean =
-        major == other.major && minor == other.minor && patch == other.patch
-
     /** True if this version's line is at or above [other]'s line. */
     fun lineAtLeast(other: KotlinReleaseVersion): Boolean =
         compareValuesBy(this, other, { it.major }, { it.minor }, { it.patch }) >= 0
+
+    /**
+     * True if this is the same `major.minor.patch` release as [other], maturity ignored
+     * (2.4.20-RC1 and 2.4.20 carry the same compiler ABI — same stance as [lineAtLeast]).
+     *
+     * This is the *trust* comparison: a version is verified only if it exactly matches a
+     * registry entry. `major.minor` is NOT a safe trust unit, because Kotlin ships feature
+     * releases in the `.20` patch slot — 2.4.20 removed four compiler APIs the plugin binds
+     * while 2.4.10 removed none, and this plugin's own floor (2.3.20) is itself an x.y.20.
+     * See GH #89 / #99.
+     */
+    fun sameRelease(other: KotlinReleaseVersion): Boolean =
+        major == other.major && minor == other.minor && patch == other.patch
 
     override fun toString(): String = raw
 
